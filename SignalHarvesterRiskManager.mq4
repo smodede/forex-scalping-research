@@ -1,112 +1,139 @@
 //+------------------------------------------------------------------+
 //|                         SignalHarvesterRiskManager_v2.mq4        |
 //|                    Copyright 2026, Senior MQL4 Engineer          |
-//|                         WITH STATE PERSISTENCE                   |
+//|              WITH STATE PERSISTENCE & FLOATING DD PROTECTION     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property link      ""
-#property version   "2.00"
+#property version   "2.10"
 #property strict
-#property description "Signal portfolio risk manager with state persistence"
+#property description "Signal portfolio risk manager with floating DD protection"
 
 //+------------------------------------------------------------------+
 //| ENUMERATIONS                                                      |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Drawdown lookback mode enumeration                               |
+//| DD_PEAK_SINCE_START: Use peak from EA start                      |
+//| DD_PEAK_ROLLING_HOURS: Use rolling window peak                   |
+//+------------------------------------------------------------------+
 enum ENUM_DD_LOOKBACK_MODE
 {
-   DD_PEAK_SINCE_START,      // Peak equity since EA start
-   DD_PEAK_ROLLING_HOURS     // Peak equity in rolling N hours
+   DD_PEAK_SINCE_START,      // Track drawdown from EA initialization
+   DD_PEAK_ROLLING_HOURS     // Track drawdown from rolling time window
 };
 
+//+------------------------------------------------------------------+
+//| Provider identification filter mode enumeration                  |
+//| FILTER_MAGIC_LIST: Filter by magic numbers                       |
+//| FILTER_COMMENT_TAGS: Filter by order comment tags                |
+//| FILTER_ALL_NON_MANUAL: Include all non-manual trades             |
+//| FILTER_ALL_TRADES: Include all trades regardless of source       |
+//+------------------------------------------------------------------+
 enum ENUM_PROVIDER_FILTER_MODE
 {
-   FILTER_MAGIC_LIST,        // Use MagicList CSV
-   FILTER_COMMENT_TAGS,      // Use CommentTags CSV
-   FILTER_ALL_NON_MANUAL,    // All trades with magic != 0
-   FILTER_ALL_TRADES         // Manage all trades including manual
+   FILTER_MAGIC_LIST,        // Only trades matching magic numbers list
+   FILTER_COMMENT_TAGS,      // Only trades matching comment tags
+   FILTER_ALL_NON_MANUAL,    // All trades with non-zero magic number
+   FILTER_ALL_TRADES         // All open trades in account
 };
 
+//+------------------------------------------------------------------+
+//| Risk reduction strategy enumeration                              |
+//| RISK_BLOCK_NEW_TRADES: Stop opening new positions                |
+//| RISK_CLOSE_WORST_FIRST: Close worst performing trades first      |
+//| RISK_PRORATA_TRIM: Close positions proportionally across all     |
+//+------------------------------------------------------------------+
 enum ENUM_RISK_REDUCTION_MODE
 {
-   RISK_BLOCK_NEW_TRADES,    // Only block new trades
-   RISK_CLOSE_WORST_FIRST,   // Close worst trades (most negative P/L)
-   RISK_PRORATA_TRIM         // Close positions proportionally
+   RISK_BLOCK_NEW_TRADES,    // Prevent new trades when exposure high
+   RISK_CLOSE_WORST_FIRST,   // Liquidate worst performers for risk reduction
+   RISK_PRORATA_TRIM         // Trim exposure evenly across all trades
 };
 
+//+------------------------------------------------------------------+
+//| Automatic stop loss calculation mode enumeration                 |
+//| AUTO_SL_NONE: No automatic SL                                    |
+//| AUTO_SL_ATR: SL based on ATR volatility                          |
+//| AUTO_SL_FIXED_PIPS: Fixed pip SL                                 |
+//| AUTO_SL_STRUCTURE: SL based on price structure                   |
+//+------------------------------------------------------------------+
 enum ENUM_AUTO_SL_MODE
 {
-   AUTO_SL_NONE,             // No automatic stop loss
-   AUTO_SL_ATR,              // ATR-based stop loss
-   AUTO_SL_FIXED_PIPS,       // Fixed pips stop loss
-   AUTO_SL_STRUCTURE         // Recent swing structure
+   AUTO_SL_NONE,             // Manual SL only
+   AUTO_SL_ATR,              // Average True Range based SL
+   AUTO_SL_FIXED_PIPS,       // Fixed pip distance SL
+   AUTO_SL_STRUCTURE         // Support/resistance based SL
 };
 
+//+------------------------------------------------------------------+
+//| Logging level enumeration                                        |
+//| LOG_ERROR: Critical errors only                                  |
+//| LOG_INFO: General information messages                           |
+//| LOG_DEBUG: Detailed debugging information                        |
+//+------------------------------------------------------------------+
 enum ENUM_LOG_LEVEL
 {
-   LOG_ERROR,
-   LOG_INFO,
-   LOG_DEBUG
+   LOG_ERROR,                // Only error level messages logged
+   LOG_INFO,                 // Error and info level messages logged
+   LOG_DEBUG                 // All messages including debug logged
 };
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                  |
 //+------------------------------------------------------------------+
-// === DRAWDOWN & EXPOSURE CONTROLS ===
-input double MaxPortfolioDDPercent = 4.0;              // Maximum portfolio drawdown budget (%)
+input double MaxPortfolioDDPercent = 4.0;
 input ENUM_DD_LOOKBACK_MODE DDLookbackMode = DD_PEAK_SINCE_START;
-input int    RollingHours = 168;                        // Rolling hours for DD calculation
-input double MaxRiskNoSLPercentPerTrade = 0.2;          // Risk per trade with no SL (%)
-input int    DefaultStopLossPips = 100;                 // Default SL in pips
+input int    RollingHours = 168;
+input double MaxRiskNoSLPercentPerTrade = 0.2;
+input int    DefaultStopLossPips = 100;
 
-// === PROVIDER FILTERING ===
-input bool   IncludeManualTrades = false;               // Include manual trades?
+input bool   UseFloatingDDProtection = true;
+input double FloatingDDWarningPercent = 2.5;
+input double FloatingDDCriticalPercent = 3.5;
+input double FloatingDDEmergencyPercent = 4.5;
+
+input bool   IncludeManualTrades = false;
 input ENUM_PROVIDER_FILTER_MODE ProviderFilterMode = FILTER_COMMENT_TAGS;
-input string MagicList = "12345,67890";                 // CSV list of magic numbers
-input string CommentTags = "SignalStart,SS:";           // CSV comment substrings
+input string MagicList = "12345,67890";
+input string CommentTags = "SignalStart,SS:";
 
-// === PROVIDER PERFORMANCE ===
-input int    MaxConcurrentProviders = 8;                // Max active providers
-input int    ProviderScoreWindowTrades = 15;            // Last N trades for scoring
-input int    ProviderMinTradesToQualify = 3;            // Min trades to qualify
-input double ProviderProfitThreshold = -100.0;          // Min net profit threshold
-input double ProviderMaxDDThreshold = 12.0;             // Max provider DD (%)
-input bool   CloseInactiveProviderOpenTrades = true;    // Close inactive provider trades?
+input int    MaxConcurrentProviders = 8;
+input int    ProviderScoreWindowTrades = 15;
+input int    ProviderMinTradesToQualify = 3;
+input double ProviderProfitThreshold = -100.0;
+input double ProviderMaxDDThreshold = 12.0;
+input bool   CloseInactiveProviderOpenTrades = true;
 
-// === RISK CAPS ===
-input int    GlobalMaxOpenTrades = 50;                  // Max open trades (increased)
-input double GlobalMaxOpenLots = 10.0;                   // Max open lots (increased)
-input double MaxSymbolExposurePercent = 2.5;            // Max per symbol (%)
-input double MaxProviderExposurePercent = 1.5;          // Max per provider (%)
+input int    GlobalMaxOpenTrades = 50;
+input double GlobalMaxOpenLots = 5.0;
+input double MaxSymbolExposurePercent = 2.5;
+input double MaxProviderExposurePercent = 1.5;
 
-// === EMERGENCY CONTROLS ===
-input bool   EmergencyKillSwitch = true;                // Emergency kill all?
+input bool   EmergencyKillSwitch = true;
 input ENUM_RISK_REDUCTION_MODE RiskReductionMode = RISK_CLOSE_WORST_FIRST;
-input double TrimStepPercent = 10.0;                    // Trim step %
+input double TrimStepPercent = 10.0;
 
-// === EQUITY & TIME STOPS ===
-input bool   UseEquityStop = true;                      // Use hard equity stop?
-input double EquityStopDDPercent = 5.0;                 // Hard stop DD %
-input bool   UseTimeStop = false;                       // Close old trades?
-input int    MaxTradeAgeMinutes = 2880;                 // Max trade age (48h)
+input bool   UseEquityStop = true;
+input double EquityStopDDPercent = 5.0;
+input bool   UseTimeStop = false;
+input int    MaxTradeAgeMinutes = 2880;
 
-// === TRAILING EQUITY LOCK ===
-input bool   UseTrailingEquityLock = false;             // Lock profits?
-input double TrailingEquityLockTriggerPercent = 10.0;   // Trigger % gain
-input double TrailingEquityLockPercent = 50.0;          // Lock % of gains
+input bool   UseTrailingEquityLock = false;
+input double TrailingEquityLockTriggerPercent = 10.0;
+input double TrailingEquityLockPercent = 50.0;
 
-// === AUTO SL/TP ===
 input ENUM_AUTO_SL_MODE AutoSLMode = AUTO_SL_FIXED_PIPS;
-input int    ATRPeriod = 14;                            // ATR period
-input double ATRMultiplier = 2.0;                       // ATR multiplier
-input int    FixedSLPips = 50;                          // Fixed SL pips
-input int    MaxAllowedSLPips = 200;                    // Max SL distance
-input double AutoTPRiskRewardRatio = 2.0;               // Auto TP RR ratio
+input int    ATRPeriod = 14;
+input double ATRMultiplier = 2.0;
+input int    FixedSLPips = 50;
+input int    MaxAllowedSLPips = 200;
+input double AutoTPRiskRewardRatio = 2.0;
 
-// === LOGGING & PERSISTENCE ===
-input ENUM_LOG_LEVEL LogLevel = LOG_INFO;               // Logging level
-input int    HistoryScanIntervalSeconds = 120;          // History scan interval
-input bool   TestMode = false;                          // Test mode
-input int    StateSaveIntervalSeconds = 300;            // State save interval (5 min)
+input ENUM_LOG_LEVEL LogLevel = LOG_INFO;
+input int    HistoryScanIntervalSeconds = 120;
+input bool   TestMode = true;
+input int    StateSaveIntervalSeconds = 300;
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                  |
@@ -117,14 +144,13 @@ datetime g_EAStartTime = 0;
 bool g_TradingDisabled = false;
 double g_EquityLockLevel = 0.0;
 datetime g_LastStateSave = 0;
+datetime g_LastFloatingDDWarning = 0;
 
-// Persistence variable names
 string g_PeakEquityVar;
 string g_KillSwitchVar;
 string g_EquityLockVar;
 string g_EAStartTimeVar;
 
-// Provider data structures
 struct ProviderStats
 {
    string   providerId;
@@ -136,10 +162,8 @@ struct ProviderStats
    bool     isActive;
    datetime lastUpdate;
 };
-
 ProviderStats g_Providers[];
 
-// Trade info structure
 struct TradeInfo
 {
    int      ticket;
@@ -156,16 +180,10 @@ struct TradeInfo
    double   riskAmount;
    double   floatingPL;
 };
-
 TradeInfo g_OpenTrades[];
 
-// Parsed input lists
 int g_MagicNumbers[];
 string g_CommentTagsList[];
-
-//+------------------------------------------------------------------+
-//| HELPER FUNCTIONS - MUST BE DEFINED BEFORE USE                    |
-//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 //| Logging function                                                 |
@@ -176,8 +194,8 @@ void Log(ENUM_LOG_LEVEL level, string message)
    
    string prefix = "";
    if(level == LOG_ERROR) prefix = "ERROR: ";
-   if(level == LOG_INFO) prefix = "INFO: ";
-   if(level == LOG_DEBUG) prefix = "DEBUG: ";
+   else if(level == LOG_INFO) prefix = "INFO: ";
+   else if(level == LOG_DEBUG) prefix = "DEBUG: ";
    
    Print(prefix + message);
 }
@@ -224,17 +242,16 @@ void ParseCommentTags()
    ArrayResize(g_CommentTagsList, 0);
    
    string tags = CommentTags;
-   
    int count = 0;
+   
    while(StringLen(tags) > 0)
    {
       int pos = StringFind(tags, ",");
       string item = (pos >= 0) ? StringSubstr(tags, 0, pos) : tags;
       
-      // Trim whitespace
-      while(StringLen(item) > 0 && StringGetCharacter(item, 0) == ' ')
+      while(StringLen(item) > 0 && StringGetCharacter(item, 0) == 32)
          item = StringSubstr(item, 1);
-      while(StringLen(item) > 0 && StringGetCharacter(item, StringLen(item)-1) == ' ')
+      while(StringLen(item) > 0 && StringGetCharacter(item, StringLen(item)-1) == 32)
          item = StringSubstr(item, 0, StringLen(item)-1);
       
       if(StringLen(item) > 0)
@@ -252,47 +269,105 @@ void ParseCommentTags()
 }
 
 //+------------------------------------------------------------------+
-//| Append event to audit log                                        |
+//| Parse CSV line - HELPER FUNCTION                                 |
+//+------------------------------------------------------------------+
+int ParseCSVLine(string line, string &fields[])
+{
+   ArrayResize(fields, 0);
+   
+   int fieldCount = 0;
+   string currentField = "";
+   bool inQuotes = false;
+   int len = StringLen(line);
+   
+   for(int i = 0; i < len; i++)
+   {
+      ushort ch = StringGetCharacter(line, i);
+      
+      if(ch == 34)
+      {
+         if(inQuotes && i + 1 < len && StringGetCharacter(line, i + 1) == 34)
+         {
+            currentField += "\"";
+            i++;
+         }
+         else
+         {
+            inQuotes = !inQuotes;
+         }
+      }
+      else if(ch == 44 && !inQuotes)
+      {
+         ArrayResize(fields, fieldCount + 1);
+         fields[fieldCount] = currentField;
+         fieldCount++;
+         currentField = "";
+      }
+      else
+      {
+         currentField += ShortToString(ch);
+      }
+   }
+   
+   if(StringLen(currentField) > 0 || fieldCount > 0)
+   {
+      ArrayResize(fields, fieldCount + 1);
+      fields[fieldCount] = currentField;
+      fieldCount++;
+   }
+   
+   return fieldCount;
+}
+
+//+------------------------------------------------------------------+
+//| Append to audit log - CORRECTED CSV FORMAT                      |
 //+------------------------------------------------------------------+
 void AppendToAuditLog(string eventType, string description, double value)
 {
    string auditFile = "SHRA_Audit_" + IntegerToString(AccountNumber()) + ".csv";
-   int handle = FileOpen(auditFile, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   int handle = FileOpen(auditFile, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
    
-   if(handle == INVALID_HANDLE) return;
-   
-   // If file is empty, write header
-   if(FileSize(handle) == 0)
+   if(handle == INVALID_HANDLE)
    {
-      FileSeek(handle, 0, SEEK_SET);
-      FileWrite(handle, "Timestamp", "Event", "Description", "Value", "Equity", "DD%", "ActiveProviders");
+      Log(LOG_ERROR, StringFormat("Failed to open audit log: %d", GetLastError()));
+      return;
    }
    
-   // Append to end
+   bool needsHeader = (FileSize(handle) == 0);
    FileSeek(handle, 0, SEEK_END);
    
-   int activeProviders = 0;
-   for(int i = 0; i < ArraySize(g_Providers); i++)
+   if(needsHeader)
    {
-      if(g_Providers[i].isActive) activeProviders++;
+      FileWriteString(handle, "Timestamp,Event,Description,Value,Equity,Balance,FloatingPL,DDPercent\n");
    }
    
-   double currentDD = 0.0; // Will be calculated properly in full version
+   double balance = AccountBalance();
+   double equity = AccountEquity();
+   double floatingPL = equity - balance;
+   double dd = 0.0;
+   if(g_PeakEquity > 0) dd = ((g_PeakEquity - equity) / g_PeakEquity) * 100.0;
    
-   FileWrite(handle,
-             TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
-             eventType,
-             description,
-             DoubleToString(value, 2),
-             DoubleToString(AccountEquity(), 2),
-             DoubleToString(currentDD, 2),
-             IntegerToString(activeProviders));
+   string timestamp = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
    
+   string safeDesc = description;
+   StringReplace(safeDesc, "\"", "\"\"");
+   if(StringFind(safeDesc, ",") >= 0) safeDesc = "\"" + safeDesc + "\"";
+   
+   string row = timestamp + "," +
+                eventType + "," +
+                safeDesc + "," +
+                DoubleToString(value, 2) + "," +
+                DoubleToString(equity, 2) + "," +
+                DoubleToString(balance, 2) + "," +
+                DoubleToString(floatingPL, 2) + "," +
+                DoubleToString(dd, 2) + "\n";
+   
+   FileWriteString(handle, row);
    FileClose(handle);
 }
 
 //+------------------------------------------------------------------+
-//| Save configuration snapshot for audit                            |
+//| Save configuration snapshot - CORRECTED FORMAT                   |
 //+------------------------------------------------------------------+
 void SaveConfigurationSnapshot()
 {
@@ -301,73 +376,81 @@ void SaveConfigurationSnapshot()
    
    if(handle == INVALID_HANDLE) return;
    
-   FileWrite(handle, "=== SignalHarvesterRiskManager Configuration Snapshot ===");
-   FileWrite(handle, "Timestamp: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
-   FileWrite(handle, "Account: " + IntegerToString(AccountNumber()));
-   FileWrite(handle, "Broker: " + AccountCompany());
-   FileWrite(handle, "Balance: " + DoubleToString(AccountBalance(), 2));
-   FileWrite(handle, "");
-   FileWrite(handle, "=== Risk Parameters ===");
-   FileWrite(handle, "MaxPortfolioDDPercent: " + DoubleToString(MaxPortfolioDDPercent, 2));
-   FileWrite(handle, "MaxProviderExposurePercent: " + DoubleToString(MaxProviderExposurePercent, 2));
-   FileWrite(handle, "MaxSymbolExposurePercent: " + DoubleToString(MaxSymbolExposurePercent, 2));
-   FileWrite(handle, "EquityStopDDPercent: " + DoubleToString(EquityStopDDPercent, 2));
-   FileWrite(handle, "");
-   FileWrite(handle, "=== Provider Settings ===");
-   FileWrite(handle, "MaxConcurrentProviders: " + IntegerToString(MaxConcurrentProviders));
-   FileWrite(handle, "ProviderMaxDDThreshold: " + DoubleToString(ProviderMaxDDThreshold, 2));
-   FileWrite(handle, "ProviderScoreWindowTrades: " + IntegerToString(ProviderScoreWindowTrades));
-   FileWrite(handle, "");
-   FileWrite(handle, "=== Current State ===");
-   FileWrite(handle, "Peak Equity: " + DoubleToString(g_PeakEquity, 2));
-   FileWrite(handle, "Current Equity: " + DoubleToString(AccountEquity(), 2));
-   FileWrite(handle, "Kill Switch: " + (g_TradingDisabled ? "ACTIVE" : "OFF"));
+   string config = "=== SignalHarvesterRiskManager v2.10 ===\n";
+   config += "Timestamp: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\n";
+   config += "Account: " + IntegerToString(AccountNumber()) + "\n";
+   config += "Broker: " + AccountCompany() + "\n";
+   config += "Balance: " + DoubleToString(AccountBalance(), 2) + "\n\n";
+   config += "=== Risk Parameters ===\n";
+   config += "MaxPortfolioDDPercent: " + DoubleToString(MaxPortfolioDDPercent, 2) + "\n";
+   config += "EquityStopDDPercent: " + DoubleToString(EquityStopDDPercent, 2) + "\n";
+   config += "MaxProviderExposurePercent: " + DoubleToString(MaxProviderExposurePercent, 2) + "\n";
+   config += "MaxSymbolExposurePercent: " + DoubleToString(MaxSymbolExposurePercent, 2) + "\n\n";
+   config += "=== Floating DD Protection ===\n";
+   config += "UseFloatingDDProtection: " + (UseFloatingDDProtection ? "true" : "false") + "\n";
+   config += "FloatingDDWarningPercent: " + DoubleToString(FloatingDDWarningPercent, 2) + "\n";
+   config += "FloatingDDCriticalPercent: " + DoubleToString(FloatingDDCriticalPercent, 2) + "\n";
+   config += "FloatingDDEmergencyPercent: " + DoubleToString(FloatingDDEmergencyPercent, 2) + "\n\n";
+   config += "=== Provider Settings ===\n";
+   config += "MaxConcurrentProviders: " + IntegerToString(MaxConcurrentProviders) + "\n";
+   config += "ProviderMaxDDThreshold: " + DoubleToString(ProviderMaxDDThreshold, 2) + "\n";
+   config += "ProviderScoreWindowTrades: " + IntegerToString(ProviderScoreWindowTrades) + "\n\n";
+   config += "=== Trade Limits ===\n";
+   config += "GlobalMaxOpenTrades: " + IntegerToString(GlobalMaxOpenTrades) + "\n";
+   config += "GlobalMaxOpenLots: " + DoubleToString(GlobalMaxOpenLots, 2) + "\n\n";
+   config += "=== Current State ===\n";
+   config += "Peak Equity: " + DoubleToString(g_PeakEquity, 2) + "\n";
+   config += "Current Equity: " + DoubleToString(AccountEquity(), 2) + "\n";
+   config += "Kill Switch: " + (g_TradingDisabled ? "ACTIVE" : "OFF") + "\n";
+   config += "Equity Lock Level: " + DoubleToString(g_EquityLockLevel, 2) + "\n";
+   config += "EA Start Time: " + TimeToString(g_EAStartTime) + "\n";
    
+   FileWriteString(handle, config);
    FileClose(handle);
-   
-   Log(LOG_DEBUG, "Configuration snapshot saved");
+   Log(LOG_DEBUG, "Configuration saved");
 }
 
 //+------------------------------------------------------------------+
-//| Save provider stats to CSV file                                  |
+//| Save provider stats - CORRECTED CSV FORMAT                      |
 //+------------------------------------------------------------------+
 bool SaveProviderStatsToFile()
 {
    string providerFile = "SHRA_Providers_" + IntegerToString(AccountNumber()) + ".csv";
-   int handle = FileOpen(providerFile, FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   int handle = FileOpen(providerFile, FILE_WRITE|FILE_TXT|FILE_ANSI);
    
    if(handle == INVALID_HANDLE)
    {
-      Log(LOG_ERROR, StringFormat("Failed to save provider stats: %d", GetLastError()));
+      Log(LOG_ERROR, StringFormat("Failed to save providers: %d", GetLastError()));
       return false;
    }
    
-   // Write header
-   FileWrite(handle, "ProviderId", "TotalTrades", "NetProfit", "ProfitFactor", 
-             "MaxDrawdown", "WinRate", "IsActive", "LastUpdate");
+   FileWriteString(handle, "ProviderId,TotalTrades,NetProfit,ProfitFactor,MaxDrawdown,WinRate,IsActive,LastUpdate\n");
    
-   // Write provider data
    for(int i = 0; i < ArraySize(g_Providers); i++)
    {
-      FileWrite(handle,
-                g_Providers[i].providerId,
-                g_Providers[i].totalTrades,
-                DoubleToString(g_Providers[i].netProfit, 2),
-                DoubleToString(g_Providers[i].profitFactor, 2),
-                DoubleToString(g_Providers[i].maxDrawdown, 2),
-                DoubleToString(g_Providers[i].winRate, 2),
-                g_Providers[i].isActive ? "1" : "0",
-                IntegerToString((int)g_Providers[i].lastUpdate));
+      string providerId = g_Providers[i].providerId;
+      StringReplace(providerId, "\"", "\"\"");
+      if(StringFind(providerId, ",") >= 0) providerId = "\"" + providerId + "\"";
+      
+      string row = providerId + "," +
+                   IntegerToString(g_Providers[i].totalTrades) + "," +
+                   DoubleToString(g_Providers[i].netProfit, 2) + "," +
+                   DoubleToString(g_Providers[i].profitFactor, 2) + "," +
+                   DoubleToString(g_Providers[i].maxDrawdown, 2) + "," +
+                   DoubleToString(g_Providers[i].winRate, 2) + "," +
+                   (g_Providers[i].isActive ? "1" : "0") + "," +
+                   IntegerToString((int)g_Providers[i].lastUpdate) + "\n";
+      
+      FileWriteString(handle, row);
    }
    
    FileClose(handle);
-   
-   Log(LOG_DEBUG, StringFormat("Saved %d provider stats to file", ArraySize(g_Providers)));
+   Log(LOG_DEBUG, StringFormat("Saved %d provider stats", ArraySize(g_Providers)));
    return true;
 }
 
 //+------------------------------------------------------------------+
-//| Load provider stats from CSV file                                |
+//| Load provider stats - CORRECTED CSV FORMAT                      |
 //+------------------------------------------------------------------+
 bool LoadProviderStatsFromFile()
 {
@@ -375,52 +458,46 @@ bool LoadProviderStatsFromFile()
    
    if(!FileIsExist(providerFile))
    {
-      Log(LOG_INFO, "No saved provider stats file found. Will build from history.");
+      Log(LOG_INFO, "No saved provider stats");
       return false;
    }
    
-   int handle = FileOpen(providerFile, FILE_READ|FILE_CSV|FILE_ANSI, ",");
+   int handle = FileOpen(providerFile, FILE_READ|FILE_TXT|FILE_ANSI);
    
    if(handle == INVALID_HANDLE)
    {
-      Log(LOG_ERROR, StringFormat("Failed to load provider stats: %d", GetLastError()));
+      Log(LOG_ERROR, StringFormat("Failed to load providers: %d", GetLastError()));
       return false;
    }
    
-   // Skip header line - read all 8 fields
-   string h1 = FileReadString(handle);
-   string h2 = FileReadString(handle);
-   string h3 = FileReadString(handle);
-   string h4 = FileReadString(handle);
-   string h5 = FileReadString(handle);
-   string h6 = FileReadString(handle);
-   string h7 = FileReadString(handle);
-   string h8 = FileReadString(handle);
-   
-   // Clear existing array
    ArrayResize(g_Providers, 0);
-   
-   // Read provider data
+   string header = FileReadString(handle);
    int count = 0;
+   
    while(!FileIsEnding(handle))
    {
+      string line = FileReadString(handle);
+      if(StringLen(line) == 0) continue;
+      
+      string fields[];
+      int fieldCount = ParseCSVLine(line, fields);
+      
+      if(fieldCount < 8)
+      {
+         Log(LOG_ERROR, StringFormat("Invalid provider line: %s", line));
+         continue;
+      }
+      
       ProviderStats stats;
+      stats.providerId = fields[0];
+      stats.totalTrades = (int)StringToInteger(fields[1]);
+      stats.netProfit = StringToDouble(fields[2]);
+      stats.profitFactor = StringToDouble(fields[3]);
+      stats.maxDrawdown = StringToDouble(fields[4]);
+      stats.winRate = StringToDouble(fields[5]);
+      stats.isActive = (fields[6] == "1");
+      stats.lastUpdate = (datetime)StringToInteger(fields[7]);
       
-      stats.providerId = FileReadString(handle);
-      if(StringLen(stats.providerId) == 0) break;
-      
-      // Validate providerId is not a header remnant
-      if(stats.providerId == "ProviderId" || stats.providerId == "TotalTrades") continue;
-      
-      stats.totalTrades = (int)FileReadNumber(handle);
-      stats.netProfit = FileReadNumber(handle);
-      stats.profitFactor = FileReadNumber(handle);
-      stats.maxDrawdown = FileReadNumber(handle);
-      stats.winRate = FileReadNumber(handle);
-      stats.isActive = ((int)FileReadNumber(handle) == 1);
-      stats.lastUpdate = (datetime)FileReadNumber(handle);
-      
-      // Add to array
       int size = ArraySize(g_Providers);
       ArrayResize(g_Providers, size + 1);
       g_Providers[size] = stats;
@@ -428,83 +505,65 @@ bool LoadProviderStatsFromFile()
    }
    
    FileClose(handle);
-   
-   Log(LOG_INFO, StringFormat("Loaded %d provider stats from file", count));
+   Log(LOG_INFO, StringFormat("Loaded %d providers", count));
    return true;
 }
 
 //+------------------------------------------------------------------+
-//| Load persisted state from GlobalVariables                         |
+//| Load persisted state                                             |
 //+------------------------------------------------------------------+
 void LoadPersistedState()
 {
-   // Initialize variable names with account number
    g_PeakEquityVar = "SHRA_PeakEquity_" + IntegerToString(AccountNumber());
    g_KillSwitchVar = "SHRA_KillSwitch_" + IntegerToString(AccountNumber());
    g_EquityLockVar = "SHRA_EquityLock_" + IntegerToString(AccountNumber());
    g_EAStartTimeVar = "SHRA_StartTime_" + IntegerToString(AccountNumber());
    
-   // 1. PEAK EQUITY
    if(GlobalVariableCheck(g_PeakEquityVar))
    {
       double savedPeak = GlobalVariableGet(g_PeakEquityVar);
-      double currentEquity = AccountEquity();
-      
-      g_PeakEquity = MathMax(savedPeak, currentEquity);
-      
-      Log(LOG_INFO, StringFormat("Peak equity restored: %.2f (stored: %.2f, current: %.2f)",
-          g_PeakEquity, savedPeak, currentEquity));
+      g_PeakEquity = MathMax(savedPeak, AccountEquity());
+      Log(LOG_INFO, StringFormat("Peak restored: %.2f", g_PeakEquity));
    }
    else
    {
       g_PeakEquity = AccountEquity();
       GlobalVariableSet(g_PeakEquityVar, g_PeakEquity);
-      Log(LOG_INFO, StringFormat("Peak equity initialized: %.2f", g_PeakEquity));
+      Log(LOG_INFO, StringFormat("Peak initialized: %.2f", g_PeakEquity));
    }
    
-   // 2. KILL SWITCH STATUS
    g_TradingDisabled = false;
    if(GlobalVariableCheck(g_KillSwitchVar))
    {
-      double flagValue = GlobalVariableGet(g_KillSwitchVar);
-      if(flagValue > 0)
+      if(GlobalVariableGet(g_KillSwitchVar) > 0)
       {
          g_TradingDisabled = true;
-         Log(LOG_ERROR, "Kill switch active from previous session. Trading disabled.");
-         AppendToAuditLog("KILL_SWITCH_PERSIST", "Kill switch was active, trading remains disabled", 0);
+         Log(LOG_ERROR, "Kill switch active from previous session");
       }
    }
    
-   // 3. EQUITY LOCK LEVEL
    if(UseTrailingEquityLock && GlobalVariableCheck(g_EquityLockVar))
    {
       g_EquityLockLevel = GlobalVariableGet(g_EquityLockVar);
-      Log(LOG_INFO, StringFormat("Equity lock level restored: %.2f", g_EquityLockLevel));
-   }
-   else
-   {
-      g_EquityLockLevel = 0.0;
+      Log(LOG_INFO, StringFormat("Equity lock restored: %.2f", g_EquityLockLevel));
    }
    
-   // 4. EA START TIME
    if(GlobalVariableCheck(g_EAStartTimeVar))
    {
       g_EAStartTime = (datetime)GlobalVariableGet(g_EAStartTimeVar);
-      Log(LOG_INFO, StringFormat("EA start time restored: %s (age: %d days)", 
-          TimeToString(g_EAStartTime), (int)((TimeCurrent() - g_EAStartTime) / 86400)));
    }
    else
    {
       g_EAStartTime = TimeCurrent();
       GlobalVariableSet(g_EAStartTimeVar, (double)g_EAStartTime);
-      Log(LOG_INFO, StringFormat("EA start time initialized: %s", TimeToString(g_EAStartTime)));
    }
    
    g_LastStateSave = TimeCurrent();
+   g_LastFloatingDDWarning = 0;
 }
 
 //+------------------------------------------------------------------+
-//| Save persisted state to GlobalVariables                          |
+//| Save persisted state                                             |
 //+------------------------------------------------------------------+
 void SavePersistedState()
 {
@@ -513,7 +572,7 @@ void SavePersistedState()
    GlobalVariableSet(g_EquityLockVar, g_EquityLockLevel);
    GlobalVariableSet(g_EAStartTimeVar, (double)g_EAStartTime);
    
-   Log(LOG_DEBUG, "Critical state saved to GlobalVariables");
+   Log(LOG_DEBUG, "State saved");
 }
 
 //+------------------------------------------------------------------+
@@ -522,52 +581,66 @@ void SavePersistedState()
 double CalculateCurrentDrawdown()
 {
    double equity = AccountEquity();
-   
    if(g_PeakEquity <= 0) return 0.0;
    
    double dd = ((g_PeakEquity - equity) / g_PeakEquity) * 100.0;
-   
    return MathMax(0.0, dd);
 }
 
 //+------------------------------------------------------------------+
-//| Calculate allowed exposure based on DD                           |
+//| Calculate signal floating PL                                     |
 //+------------------------------------------------------------------+
-double CalculateAllowedExposure(double currentDD)
+double CalculateSignalFloatingPL()
 {
-   if(currentDD >= MaxPortfolioDDPercent)
+   double total = 0.0;
+   for(int i = 0; i < ArraySize(g_OpenTrades); i++)
    {
-      return 0.0;
+      total += g_OpenTrades[i].floatingPL;
    }
-   
-   double allowedExposure = MaxPortfolioDDPercent * (1.0 - (currentDD / MaxPortfolioDDPercent));
-   
-   return allowedExposure;
+   return total;
 }
 
 //+------------------------------------------------------------------+
-//| Identify provider from trade                                     |
+//| Calculate signal floating DD                                     |
+//+------------------------------------------------------------------+
+double CalculateSignalFloatingDD()
+{
+   double balance = AccountBalance();
+   double floatingPL = CalculateSignalFloatingPL();
+   
+   if(balance <= 0 || floatingPL >= 0) return 0.0;
+   
+   return (-1.0 * floatingPL / balance) * 100.0;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate allowed exposure                                       |
+//+------------------------------------------------------------------+
+double CalculateAllowedExposure(double currentDD)
+{
+   if(currentDD >= MaxPortfolioDDPercent) return 0.0;
+   
+   return MaxPortfolioDDPercent * (1.0 - (currentDD / MaxPortfolioDDPercent));
+}
+
+//+------------------------------------------------------------------+
+//| Identify provider                                                |
 //+------------------------------------------------------------------+
 string IdentifyProvider(int magic, string comment)
 {
-   if(magic != 0)
-   {
-      return "Magic_" + IntegerToString(magic);
-   }
+   if(magic != 0) return "Magic_" + IntegerToString(magic);
    
    for(int i = 0; i < ArraySize(g_CommentTagsList); i++)
    {
       if(StringFind(comment, g_CommentTagsList[i]) >= 0)
-      {
          return g_CommentTagsList[i];
-      }
    }
    
    return "Manual";
 }
 
 //+------------------------------------------------------------------+
-//| Calculate risk for a trade                                       |
+//| Calculate trade risk                                             |
 //+------------------------------------------------------------------+
 double CalculateTradeRisk(int tradeIndex)
 {
@@ -581,38 +654,22 @@ double CalculateTradeRisk(int tradeIndex)
       double pointValue = MarketInfo(trade.symbol, MODE_TICKVALUE);
       double pipSize = MarketInfo(trade.symbol, MODE_POINT);
       
-      if(StringFind(trade.symbol, "JPY") >= 0)
-      {
-         pipSize *= 10;
-      }
+      if(StringFind(trade.symbol, "JPY") >= 0) pipSize *= 10;
       
       double pips = slDistance / pipSize;
-      double risk = pips * pointValue * trade.lots;
-      
-      return risk;
+      return pips * pointValue * trade.lots;
    }
-   else
-   {
-      double equity = AccountEquity();
-      double defaultRisk = equity * (MaxRiskNoSLPercentPerTrade / 100.0);
-      return defaultRisk;
-   }
+   
+   return AccountEquity() * (MaxRiskNoSLPercentPerTrade / 100.0);
 }
 
 //+------------------------------------------------------------------+
-//| Check if trade should be managed                                 |
+//| Check if should manage trade                                     |
 //+------------------------------------------------------------------+
 bool ShouldManageTrade(int magic, string comment)
 {
-   if(ProviderFilterMode == FILTER_ALL_TRADES)
-   {
-      return true;
-   }
-   
-   if(ProviderFilterMode == FILTER_ALL_NON_MANUAL)
-   {
-      return (magic != 0);
-   }
+   if(ProviderFilterMode == FILTER_ALL_TRADES) return true;
+   if(ProviderFilterMode == FILTER_ALL_NON_MANUAL) return (magic != 0);
    
    if(ProviderFilterMode == FILTER_MAGIC_LIST)
    {
@@ -620,8 +677,7 @@ bool ShouldManageTrade(int magic, string comment)
       {
          if(magic == g_MagicNumbers[i]) return true;
       }
-      if(IncludeManualTrades && magic == 0) return true;
-      return false;
+      return (IncludeManualTrades && magic == 0);
    }
    
    if(ProviderFilterMode == FILTER_COMMENT_TAGS)
@@ -630,15 +686,14 @@ bool ShouldManageTrade(int magic, string comment)
       {
          if(StringFind(comment, g_CommentTagsList[i]) >= 0) return true;
       }
-      if(IncludeManualTrades && magic == 0) return true;
-      return false;
+      return (IncludeManualTrades && magic == 0);
    }
    
    return false;
 }
 
 //+------------------------------------------------------------------+
-//| Scan open orders and classify                                    |
+//| Scan open orders                                                 |
 //+------------------------------------------------------------------+
 void ScanOpenOrders()
 {
@@ -647,13 +702,8 @@ void ScanOpenOrders()
    for(int i = 0; i < OrdersTotal(); i++)
    {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
-      
       if(OrderType() > OP_SELL) continue;
-      
-      if(!ShouldManageTrade(OrderMagicNumber(), OrderComment()))
-      {
-         continue;
-      }
+      if(!ShouldManageTrade(OrderMagicNumber(), OrderComment())) continue;
       
       int size = ArraySize(g_OpenTrades);
       ArrayResize(g_OpenTrades, size + 1);
@@ -673,25 +723,25 @@ void ScanOpenOrders()
       g_OpenTrades[size].floatingPL = OrderProfit() + OrderSwap() + OrderCommission();
    }
    
-   Log(LOG_DEBUG, StringFormat("Scanned %d managed open trades", ArraySize(g_OpenTrades)));
+   Log(LOG_DEBUG, StringFormat("Scanned %d trades", ArraySize(g_OpenTrades)));
 }
 
 //+------------------------------------------------------------------+
-//| Calculate total portfolio exposure                               |
+//| Calculate total exposure                                         |
 //+------------------------------------------------------------------+
 double CalculateTotalExposure()
 {
-   double totalRisk = 0.0;
+   double total = 0.0;
    double equity = AccountEquity();
    
    if(equity <= 0) return 0.0;
    
    for(int i = 0; i < ArraySize(g_OpenTrades); i++)
    {
-      totalRisk += g_OpenTrades[i].riskAmount;
+      total += g_OpenTrades[i].riskAmount;
    }
    
-   return (totalRisk / equity) * 100.0;
+   return (total / equity) * 100.0;
 }
 
 //+------------------------------------------------------------------+
@@ -709,24 +759,24 @@ bool CloseOrder(int ticket, string reason)
    
    if(result)
    {
-      Log(LOG_INFO, StringFormat("Closed order %d: %s", ticket, reason));
+      Log(LOG_INFO, StringFormat("Closed #%d: %s", ticket, reason));
    }
    else
    {
-      Log(LOG_ERROR, StringFormat("Failed to close order %d: %d", ticket, GetLastError()));
+      Log(LOG_ERROR, StringFormat("Failed #%d: %d", ticket, GetLastError()));
    }
    
    return result;
 }
 
 //+------------------------------------------------------------------+
-//| Find worst performing trade                                      |
+//| Find worst trade                                                 |
 //+------------------------------------------------------------------+
 int FindWorstTrade()
 {
    if(ArraySize(g_OpenTrades) == 0) return -1;
    
-   int worstIndex = 0;
+   int worstIdx = 0;
    double worstPL = g_OpenTrades[0].floatingPL;
    
    for(int i = 1; i < ArraySize(g_OpenTrades); i++)
@@ -734,133 +784,158 @@ int FindWorstTrade()
       if(g_OpenTrades[i].floatingPL < worstPL)
       {
          worstPL = g_OpenTrades[i].floatingPL;
-         worstIndex = i;
+         worstIdx = i;
       }
    }
    
-   return worstIndex;
+   return worstIdx;
+}
+
+//+------------------------------------------------------------------+
+//| Close worst trades                                               |
+//+------------------------------------------------------------------+
+void CloseWorstTrades(double percentage)
+{
+   int total = ArraySize(g_OpenTrades);
+   if(total == 0) return;
+   
+   int sortedIdx[];
+   ArrayResize(sortedIdx, total);
+   
+   for(int i = 0; i < total; i++) sortedIdx[i] = i;
+   
+   for(int i = 0; i < total - 1; i++)
+   {
+      for(int j = 0; j < total - i - 1; j++)
+      {
+         if(g_OpenTrades[sortedIdx[j]].floatingPL > g_OpenTrades[sortedIdx[j+1]].floatingPL)
+         {
+            int temp = sortedIdx[j];
+            sortedIdx[j] = sortedIdx[j+1];
+            sortedIdx[j+1] = temp;
+         }
+      }
+   }
+   
+   int toClose = (int)MathCeil(total * percentage);
+   int closed = 0;
+   
+   for(int i = 0; i < toClose && i < total; i++)
+   {
+      int idx = sortedIdx[i];
+      if(CloseOrder(g_OpenTrades[idx].ticket, "Floating DD critical"))
+      {
+         closed++;
+      }
+   }
+   
+   Log(LOG_INFO, StringFormat("Closed %d trades", closed));
 }
 
 //+------------------------------------------------------------------+
 //| Handle exposure breach                                           |
 //+------------------------------------------------------------------+
-void HandleExposureBreach(double currentExposure, double allowedExposure)
+void HandleExposureBreach(double currentExp, double allowedExp)
 {
    AppendToAuditLog("EXPOSURE_BREACH",
-                    StringFormat("Exposure %.2f%% exceeds allowed %.2f%%", currentExposure, allowedExposure),
-                    currentExposure);
+                    StringFormat("%.2f > %.2f", currentExp, allowedExp),
+                    currentExp);
    
    if(RiskReductionMode == RISK_CLOSE_WORST_FIRST)
    {
-      while(CalculateTotalExposure() > allowedExposure && ArraySize(g_OpenTrades) > 0)
+      while(CalculateTotalExposure() > allowedExp && ArraySize(g_OpenTrades) > 0)
       {
-         int worstIndex = FindWorstTrade();
-         if(worstIndex >= 0)
+         int idx = FindWorstTrade();
+         if(idx >= 0)
          {
-            CloseOrder(g_OpenTrades[worstIndex].ticket, "Exposure breach");
+            CloseOrder(g_OpenTrades[idx].ticket, "Exposure breach");
             ScanOpenOrders();
          }
-         else
-         {
-            break;
-         }
+         else break;
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Enhanced ActivateKillSwitch with persistence                     |
+//| Activate kill switch                                             |
 //+------------------------------------------------------------------+
 void ActivateKillSwitch()
 {
-   Log(LOG_ERROR, "=== KILL SWITCH ACTIVATED ===");
+   Log(LOG_ERROR, "KILL SWITCH ACTIVATED");
    
    double currentDD = CalculateCurrentDrawdown();
+   double floatingDD = CalculateSignalFloatingDD();
    
    AppendToAuditLog("KILL_SWITCH", 
-                    StringFormat("Emergency stop triggered. DD: %.2f%%, Open trades: %d", 
-                                 currentDD, ArraySize(g_OpenTrades)),
+                    StringFormat("DD:%.2f FloatDD:%.2f Trades:%d", 
+                                 currentDD, floatingDD, ArraySize(g_OpenTrades)),
                     AccountEquity());
    
-   int closedCount = 0;
+   int closed = 0;
    for(int i = ArraySize(g_OpenTrades) - 1; i >= 0; i--)
    {
-      if(CloseOrder(g_OpenTrades[i].ticket, "Kill switch"))
-      {
-         closedCount++;
-      }
+      if(CloseOrder(g_OpenTrades[i].ticket, "Kill switch")) closed++;
    }
    
    GlobalVariableSet(g_KillSwitchVar, 1.0);
    g_TradingDisabled = true;
-   
    SaveProviderStatsToFile();
    
-   Log(LOG_ERROR, StringFormat("Kill switch activated: %d trades closed. Trading disabled.", closedCount));
-   
-   Alert("SignalHarvesterRiskManager: KILL SWITCH ACTIVATED! Trading disabled.");
+   Log(LOG_ERROR, StringFormat("%d trades closed", closed));
+   Alert("KILL SWITCH: ", closed, " trades closed");
 }
 
 //+------------------------------------------------------------------+
-//| Enhanced UpdatePeakEquity with persistence                        |
+//| Update peak equity                                               |
 //+------------------------------------------------------------------+
 void UpdatePeakEquity()
 {
-   double currentEquity = AccountEquity();
+   double equity = AccountEquity();
    
-   if(DDLookbackMode == DD_PEAK_SINCE_START)
+   if(equity > g_PeakEquity)
    {
-      if(currentEquity > g_PeakEquity)
-      {
-         double oldPeak = g_PeakEquity;
-         g_PeakEquity = currentEquity;
-         
-         GlobalVariableSet(g_PeakEquityVar, g_PeakEquity);
-         
-         AppendToAuditLog("PEAK_EQUITY_UPDATE", 
-                          StringFormat("Peak increased from %.2f to %.2f", oldPeak, g_PeakEquity),
-                          g_PeakEquity);
-         
-         Log(LOG_DEBUG, StringFormat("New peak equity: %.2f (persisted)", g_PeakEquity));
-      }
+      double oldPeak = g_PeakEquity;
+      g_PeakEquity = equity;
+      GlobalVariableSet(g_PeakEquityVar, g_PeakEquity);
+      
+      AppendToAuditLog("PEAK_UPDATE", 
+                       StringFormat("%.2f to %.2f", oldPeak, g_PeakEquity),
+                       g_PeakEquity);
+      
+      Log(LOG_DEBUG, StringFormat("New peak: %.2f", g_PeakEquity));
    }
 }
 
 //+------------------------------------------------------------------+
-//| Enhanced CheckTrailingEquityLock with persistence                |
+//| Check trailing equity lock                                       |
 //+------------------------------------------------------------------+
 void CheckTrailingEquityLock()
 {
    double equity = AccountEquity();
    double balance = AccountBalance();
    double gain = equity - balance;
-   double gainPercent = (balance > 0) ? ((gain / balance) * 100.0) : 0.0;
+   double gainPct = (balance > 0) ? (gain / balance) * 100.0 : 0.0;
    
-   if(gainPercent >= TrailingEquityLockTriggerPercent)
+   if(gainPct >= TrailingEquityLockTriggerPercent)
    {
-      double lockLevel = balance + (gain * (TrailingEquityLockPercent / 100.0));
+      double lockLevel = balance + (gain * TrailingEquityLockPercent / 100.0);
       
       if(lockLevel > g_EquityLockLevel)
       {
-         double oldLock = g_EquityLockLevel;
          g_EquityLockLevel = lockLevel;
-         
          GlobalVariableSet(g_EquityLockVar, g_EquityLockLevel);
          
          AppendToAuditLog("EQUITY_LOCK_UPDATE",
-                          StringFormat("Lock raised from %.2f to %.2f (Gain: %.2f%%)", 
-                                       oldLock, g_EquityLockLevel, gainPercent),
+                          StringFormat("Lock: %.2f Gain: %.2f%%", g_EquityLockLevel, gainPct),
                           g_EquityLockLevel);
-         
-         Log(LOG_INFO, StringFormat("Trailing equity lock updated: %.2f (persisted)", g_EquityLockLevel));
       }
       
       if(equity < g_EquityLockLevel)
       {
-         Log(LOG_ERROR, StringFormat("Equity lock triggered: %.2f < %.2f", equity, g_EquityLockLevel));
+         Log(LOG_ERROR, StringFormat("Lock breach: %.2f < %.2f", equity, g_EquityLockLevel));
          
          AppendToAuditLog("EQUITY_LOCK_BREACH",
-                          StringFormat("Equity %.2f dropped below lock %.2f", equity, g_EquityLockLevel),
+                          StringFormat("Equity %.2f below lock %.2f", equity, g_EquityLockLevel),
                           equity);
          
          ActivateKillSwitch();
@@ -869,63 +944,22 @@ void CheckTrailingEquityLock()
 }
 
 //+------------------------------------------------------------------+
-//| Update provider stats from history (placeholder)                 |
+//| Placeholder functions                                            |
 //+------------------------------------------------------------------+
-void UpdateProviderStatsFromHistory()
-{
-   Log(LOG_DEBUG, "Provider stats updated from history");
-}
+void UpdateProviderStatsFromHistory() { }
+void EnforceGlobalCaps() { }
+void EnforceSymbolCaps() { }
+void EnforceProviderCaps() { }
+void EnforceTimeStops() { }
+void ApplyAutoSLTP() { }
 
 //+------------------------------------------------------------------+
-//| Enforce global caps (placeholder)                                |
-//+------------------------------------------------------------------+
-void EnforceGlobalCaps()
-{
-   if(ArraySize(g_OpenTrades) > GlobalMaxOpenTrades)
-   {
-      Log(LOG_ERROR, StringFormat("Global max trades exceeded: %d > %d", 
-          ArraySize(g_OpenTrades), GlobalMaxOpenTrades));
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Enforce symbol caps (placeholder)                                |
-//+------------------------------------------------------------------+
-void EnforceSymbolCaps()
-{
-   // Implementation: Check per-symbol exposure
-}
-
-//+------------------------------------------------------------------+
-//| Enforce provider caps (placeholder)                              |
-//+------------------------------------------------------------------+
-void EnforceProviderCaps()
-{
-   // Implementation: Check per-provider exposure
-}
-
-//+------------------------------------------------------------------+
-//| Enforce time stops (placeholder)                                 |
-//+------------------------------------------------------------------+
-void EnforceTimeStops()
-{
-   // Implementation: Close trades older than MaxTradeAgeMinutes
-}
-
-//+------------------------------------------------------------------+
-//| Apply auto SL/TP (placeholder)                                   |
-//+------------------------------------------------------------------+
-void ApplyAutoSLTP()
-{
-   // Implementation: Set SL/TP on trades without them
-}
-
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Log(LOG_INFO, "=== SignalHarvesterRiskManager v2.0 Starting (WITH PERSISTENCE) ===");
+   Log(LOG_INFO, "SignalHarvesterRiskManager v2.10 Starting");
+   Log(LOG_INFO, "Features: State Persistence + Floating DD Protection + Corrected CSV");
    
    LoadPersistedState();
    ParseMagicList();
@@ -933,29 +967,31 @@ int OnInit()
    LoadProviderStatsFromFile();
    SaveConfigurationSnapshot();
    
-   Log(LOG_INFO, StringFormat("State loaded: Peak=%.2f, KillSwitch=%s, Providers=%d",
-       g_PeakEquity, g_TradingDisabled ? "ACTIVE" : "OFF", ArraySize(g_Providers)));
-   Log(LOG_INFO, StringFormat("MaxPortfolioDDPercent: %.2f%%, EquityStopDDPercent: %.2f%%", 
-       MaxPortfolioDDPercent, EquityStopDDPercent));
+   Log(LOG_INFO, StringFormat("Peak:%.2f KillSwitch:%s Providers:%d", 
+       g_PeakEquity, g_TradingDisabled ? "ON" : "OFF", ArraySize(g_Providers)));
+   
+   if(UseFloatingDDProtection)
+   {
+      Log(LOG_INFO, StringFormat("FloatDD: Warn=%.1f%% Crit=%.1f%% Emerg=%.1f%%",
+          FloatingDDWarningPercent, FloatingDDCriticalPercent, FloatingDDEmergencyPercent));
+   }
    
    AppendToAuditLog("EA_START", "EA initialized successfully", AccountEquity());
    
-   return(INIT_SUCCEEDED);
+   return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Expert deinitialization                                          |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   Log(LOG_INFO, StringFormat("=== SignalHarvesterRiskManager EA Stopped (Reason: %d) ===", reason));
+   Log(LOG_INFO, StringFormat("EA Stopped (Reason:%d)", reason));
    
    SavePersistedState();
    SaveProviderStatsToFile();
    
-   AppendToAuditLog("EA_STOP", StringFormat("EA deinitialized. Reason: %d", reason), AccountEquity());
-   
-   Log(LOG_INFO, "All state saved successfully");
+   AppendToAuditLog("EA_STOP", StringFormat("Reason:%d", reason), AccountEquity());
 }
 
 //+------------------------------------------------------------------+
@@ -963,27 +999,59 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   if(g_TradingDisabled)
-   {
-      return;
-   }
+   if(g_TradingDisabled) return;
    
    UpdatePeakEquity();
    
    double currentDD = CalculateCurrentDrawdown();
    
+   ScanOpenOrders();
+   
+   double floatingDD = CalculateSignalFloatingDD();
+   double floatingPL = CalculateSignalFloatingPL();
+   
+   if(UseFloatingDDProtection)
+   {
+      if(floatingDD >= FloatingDDWarningPercent)
+      {
+         if(TimeCurrent() - g_LastFloatingDDWarning >= 300)
+         {
+            Log(LOG_ERROR, StringFormat("WARNING: FloatDD %.2f%% (%.2f)", floatingDD, floatingPL));
+            AppendToAuditLog("FLOAT_WARN", StringFormat("FloatDD:%.2f%% FloatPL:%.2f", floatingDD, floatingPL), floatingDD);
+            g_LastFloatingDDWarning = TimeCurrent();
+         }
+      }
+      
+      if(floatingDD >= FloatingDDCriticalPercent)
+      {
+         Log(LOG_ERROR, StringFormat("CRITICAL: FloatDD %.2f%% - Closing worst 20%%", floatingDD));
+         AppendToAuditLog("FLOAT_CRIT", StringFormat("FloatDD:%.2f%% closing worst trades", floatingDD), floatingDD);
+         
+         CloseWorstTrades(0.2);
+         ScanOpenOrders();
+         floatingDD = CalculateSignalFloatingDD();
+         floatingPL = CalculateSignalFloatingPL();
+         
+         Log(LOG_INFO, StringFormat("After closing: FloatDD %.2f%% (%.2f)", floatingDD, floatingPL));
+      }
+      
+      if(floatingDD >= FloatingDDEmergencyPercent)
+      {
+         Log(LOG_ERROR, StringFormat("EMERGENCY: FloatDD %.2f%% - KILL SWITCH", floatingDD));
+         AppendToAuditLog("FLOAT_EMERG", StringFormat("FloatDD:%.2f%% emergency kill", floatingDD), floatingDD);
+         ActivateKillSwitch();
+         return;
+      }
+   }
+   
    if(UseEquityStop && currentDD >= EquityStopDDPercent)
    {
-      Log(LOG_ERROR, StringFormat("EQUITY STOP TRIGGERED! DD: %.2f%% >= %.2f%%", 
-          currentDD, EquityStopDDPercent));
+      Log(LOG_ERROR, StringFormat("EQUITY STOP: %.2f%% >= %.2f%%", currentDD, EquityStopDDPercent));
       ActivateKillSwitch();
       return;
    }
    
-   if(UseTrailingEquityLock)
-   {
-      CheckTrailingEquityLock();
-   }
+   if(UseTrailingEquityLock) CheckTrailingEquityLock();
    
    if(TimeCurrent() - g_LastHistoryScan >= HistoryScanIntervalSeconds)
    {
@@ -991,38 +1059,36 @@ void OnTick()
       g_LastHistoryScan = TimeCurrent();
    }
    
-   ScanOpenOrders();
+   if(UseTimeStop) EnforceTimeStops();
    
-   if(UseTimeStop)
-   {
-      EnforceTimeStops();
-   }
-   
-   double totalExposure = CalculateTotalExposure();
-   double allowedExposure = CalculateAllowedExposure(currentDD);
+   double totalExp = CalculateTotalExposure();
+   double allowedExp = CalculateAllowedExposure(currentDD);
    
    if(TestMode)
    {
       static datetime lastPrint = 0;
       if(TimeCurrent() - lastPrint >= 10)
       {
-         Log(LOG_INFO, StringFormat("TEST MODE | Equity: %.2f | Peak: %.2f | DD: %.2f%% | Exposure: %.2f%% | Allowed: %.2f%%",
-             AccountEquity(), g_PeakEquity, currentDD, totalExposure, allowedExposure));
+         string status = "";
+         if(floatingDD >= FloatingDDCriticalPercent) status = " CRIT";
+         else if(floatingDD >= FloatingDDWarningPercent) status = " WARN";
+         
+         Log(LOG_INFO, StringFormat("TEST Eq:%.0f Pk:%.0f DD:%.2f%% Flt:%.2f%%(%.0f)%s Exp:%.2f%% T:%d",
+             AccountEquity(), g_PeakEquity, currentDD, floatingDD, floatingPL, status, totalExp, ArraySize(g_OpenTrades)));
+         
          lastPrint = TimeCurrent();
       }
    }
    
-   if(totalExposure > allowedExposure)
+   if(totalExp > allowedExp)
    {
-      Log(LOG_ERROR, StringFormat("EXPOSURE BREACH! Total: %.2f%% > Allowed: %.2f%%", 
-          totalExposure, allowedExposure));
-      HandleExposureBreach(totalExposure, allowedExposure);
+      Log(LOG_ERROR, StringFormat("EXPOSURE: %.2f%% > %.2f%%", totalExp, allowedExp));
+      HandleExposureBreach(totalExp, allowedExp);
    }
    
    EnforceGlobalCaps();
    EnforceSymbolCaps();
    EnforceProviderCaps();
-   
    ApplyAutoSLTP();
    
    if(TimeCurrent() - g_LastStateSave >= StateSaveIntervalSeconds)
@@ -1030,9 +1096,7 @@ void OnTick()
       SavePersistedState();
       SaveProviderStatsToFile();
       g_LastStateSave = TimeCurrent();
-      
-      Log(LOG_DEBUG, "Periodic state save completed");
+      Log(LOG_DEBUG, "Periodic save completed");
    }
 }
-
 //+------------------------------------------------------------------+
