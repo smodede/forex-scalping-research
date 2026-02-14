@@ -387,8 +387,15 @@ bool LoadProviderStatsFromFile()
       return false;
    }
    
-   // Skip header line
-   string dummy = FileReadString(handle);
+   // Skip header line - read all 8 fields
+   string h1 = FileReadString(handle);
+   string h2 = FileReadString(handle);
+   string h3 = FileReadString(handle);
+   string h4 = FileReadString(handle);
+   string h5 = FileReadString(handle);
+   string h6 = FileReadString(handle);
+   string h7 = FileReadString(handle);
+   string h8 = FileReadString(handle);
    
    // Clear existing array
    ArrayResize(g_Providers, 0);
@@ -401,6 +408,9 @@ bool LoadProviderStatsFromFile()
       
       stats.providerId = FileReadString(handle);
       if(StringLen(stats.providerId) == 0) break;
+      
+      // Validate providerId is not a header remnant
+      if(stats.providerId == "ProviderId" || stats.providerId == "TotalTrades") continue;
       
       stats.totalTrades = (int)FileReadNumber(handle);
       stats.netProfit = FileReadNumber(handle);
