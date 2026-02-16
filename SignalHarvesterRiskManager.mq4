@@ -547,12 +547,18 @@ void ResetProviderKillSwitch(string providerId)
       return;
    }
    
+   double oldPeak = g_ProviderStats[idx].peakEquity;
+   double currentEquity = g_ProviderStats[idx].currentEquity;
+   
+   // Reset peak to current equity to give provider fresh start
+   g_ProviderStats[idx].peakEquity = currentEquity;
    g_ProviderStats[idx].killSwitchTriggered = false;
    
-   AppendToAuditLog(providerId, "KILLSWITCH_RESET", 0.0, "Kill switch manually reset");
+   AppendToAuditLog(providerId, "KILLSWITCH_RESET", 0.0, 
+                   StringFormat("Kill switch reset - Peak reset from %.2f to %.2f", oldPeak, currentEquity));
    
-   Alert(StringFormat("Provider %s: Kill switch RESET", providerId));
-   DebugLog(StringFormat("Kill switch reset: %s", providerId));
+   Alert(StringFormat("Provider %s: Kill switch RESET (Peak: $%.2f → $%.2f)", providerId, oldPeak, currentEquity));
+   DebugLog(StringFormat("Kill switch reset: %s (Peak reset to current equity)", providerId));
 }
 
 //+------------------------------------------------------------------+
