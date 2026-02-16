@@ -182,19 +182,16 @@ int EnsureProviderExists(string providerId)
 //+------------------------------------------------------------------+
 string IdentifyProvider(int magic, string comment)
 {
+   // ONLY match configured provider IDs in comments
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
    {
       if(StringFind(comment, g_ProviderStats[i].providerId) >= 0)
          return g_ProviderStats[i].providerId;
    }
    
-   if(magic != 0)
-      return "Magic_" + IntegerToString(magic);
-   
-   if(StringLen(comment) > 0)
-      return comment;
-   
-   return "Unknown";
+   // Return empty string if no matching provider found
+   // This filters out trades without proper provider identification
+   return "";
 }
 
 //+------------------------------------------------------------------+
@@ -210,6 +207,14 @@ void ScanOpenOrders()
       if(OrderType() > OP_SELL) continue;
       
       string providerId = IdentifyProvider(OrderMagicNumber(), OrderComment());
+      
+      // Skip trades without valid provider identification
+      if(StringLen(providerId) == 0)
+      {
+         DebugLog(StringFormat("Skipping trade #%d (Magic:%d) - no matching provider in comment: %s",
+                              OrderTicket(), OrderMagicNumber(), OrderComment()));
+         continue;
+      }
       
       int size = ArraySize(g_OpenTrades);
       ArrayResize(g_OpenTrades, size + 1);
@@ -260,6 +265,10 @@ void UpdateProviderEquityStats()
          if(OrderType() > OP_SELL) continue;
          
          string pid = IdentifyProvider(OrderMagicNumber(), OrderComment());
+         
+         // Skip closed trades without valid provider identification
+         if(StringLen(pid) == 0) continue;
+         
          int idx = EnsureProviderExists(pid);
          
          g_ProviderStats[idx].closedPL += OrderProfit() + OrderSwap() + OrderCommission();
