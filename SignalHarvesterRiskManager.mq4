@@ -282,8 +282,10 @@ void UpdateProviderEquityStats()
       g_ProviderStats[i].currentEquity = g_ProviderStats[i].closedPL + 
                                          g_ProviderStats[i].floatingPL;
       
-      if(g_ProviderStats[i].currentEquity > g_ProviderStats[i].peakEquity)
-         g_ProviderStats[i].peakEquity = g_ProviderStats[i].currentEquity;
+      // Update peak only on realized profits (closed trades)
+      // This prevents premature exits from floating P&L volatility
+      if(g_ProviderStats[i].closedPL > g_ProviderStats[i].peakEquity)
+         g_ProviderStats[i].peakEquity = g_ProviderStats[i].closedPL;
    }
 }
 
