@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                  SignalHarvesterProviderDD_Complete.mq4          |
 //|         Per-Provider + Group DD + All Reset Methods Integrated   |
-//|                    PRODUCTION READY v3.1                         |
+//|                    PRODUCTION READY v3.2                         |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "3.1"
+#property version   "3.2"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -40,6 +40,10 @@ input bool   EnableDebugLogs = true;
 input bool   ShowChartButtons = true;           // Show reset buttons on chart
 input bool   EnableKeyboardShortcuts = true;    // Enable keyboard shortcuts
 
+// Auto-Reset Settings
+input bool   EnableAutoResetAfterKillSwitch = false;  // Auto-reset kill switches after trigger
+input int    AutoResetDelaySeconds = 300;             // Delay before auto-reset (5 minutes default)
+
 // UI Settings
 input int    ButtonXPosition = 20;
 input int    ButtonYPosition = 50;
@@ -62,6 +66,7 @@ struct ProviderStats
    double   emergDDPercent;
    bool     killSwitchTriggered;
    datetime lastWarnTime;
+   datetime killSwitchTime;       // When kill switch was triggered
    int      tradesCount;
 };
 
@@ -76,6 +81,7 @@ struct GroupStats
    int      activeProviders;      // Providers with open trades
    int      totalTrades;
    bool     killSwitchTriggered;
+   datetime killSwitchTime;       // When kill switch was triggered
    datetime lastWarnTime;
 };
 
@@ -165,6 +171,7 @@ int EnsureGroupExists(string groupId)
    g_GroupStats[size].activeProviders = 0;
    g_GroupStats[size].totalTrades = 0;
    g_GroupStats[size].killSwitchTriggered = false;
+   g_GroupStats[size].killSwitchTime = 0;
    g_GroupStats[size].lastWarnTime = 0;
    
    DebugLog(StringFormat("Created group tracker: %s", groupId));
@@ -210,6 +217,7 @@ bool ParseProviderDDSettings()
             g_ProviderStats[providerCount].closedPL = 0.0;
             g_ProviderStats[providerCount].floatingPL = 0.0;
             g_ProviderStats[providerCount].killSwitchTriggered = false;
+            g_ProviderStats[providerCount].killSwitchTime = 0;
             g_ProviderStats[providerCount].lastWarnTime = 0;
             g_ProviderStats[providerCount].tradesCount = 0;
             
@@ -278,6 +286,8 @@ int EnsureProviderExists(string providerId)
    g_ProviderStats[size].closedPL = 0.0;
    g_ProviderStats[size].floatingPL = 0.0;
    g_ProviderStats[size].killSwitchTriggered = false;
+   g_ProviderStats[size].killSwitchTime = 0;
+   g_ProviderStats[size].killSwitchTime = 0;
    g_ProviderStats[size].lastWarnTime = 0;
    g_ProviderStats[size].tradesCount = 0;
    
@@ -458,11 +468,16 @@ void UpdateGroupStats()
       g_GroupStats[i].totalTrades = 0;
    }
    
-   // Aggregate provider stats into groups
+   // Aggregate provider stats into groups (exclude killed providers)
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
    {
       string groupId = g_ProviderStats[i].groupId;
       if(StringLen(groupId) == 0) continue;
+      
+      // Skip providers with active kill switches - they're "dead" and shouldn't
+      // influence group risk decisions. This prevents cascading group kills when
+      // a profitable provider's kill switch triggers and removes its cushion.
+      if(g_ProviderStats[i].killSwitchTriggered) continue;
       
       int gIdx = EnsureGroupExists(groupId);
       if(gIdx < 0) continue;
@@ -602,6 +617,66 @@ void AppendToAuditLog(string providerId, string eventType, double ddPercent, str
 }
 
 //+------------------------------------------------------------------+
+//| Auto-Reset Kill Switches                                         |
+//+------------------------------------------------------------------+
+void AutoResetKillSwitches()
+{
+   if(!EnableAutoResetAfterKillSwitch) return;
+   
+   datetime currentTime = TimeCurrent();
+   
+   // Auto-reset provider kill switches
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      if(g_ProviderStats[i].killSwitchTriggered && 
+         g_ProviderStats[i].killSwitchTime > 0 &&
+         g_ProviderStats[i].tradesCount == 0)  // Only reset if no open trades
+      {
+         if(currentTime - g_ProviderStats[i].killSwitchTime >= AutoResetDelaySeconds)
+         {
+            g_ProviderStats[i].killSwitchTriggered = false;
+            g_ProviderStats[i].peakEquity = 0.0;  // Reset peak to allow fresh start
+            g_ProviderStats[i].closedPL = 0.0;
+            
+            DebugLog(StringFormat("✅ Auto-reset kill switch for provider: %s", 
+                                 g_ProviderStats[i].providerId));
+            
+            AppendToAuditLog(g_ProviderStats[i].providerId, "AUTO_RESET", 0.0,
+                           StringFormat("Kill switch auto-reset after %d seconds", AutoResetDelaySeconds));
+            
+            // Update button colors
+            UpdateButtonColors();
+         }
+      }
+   }
+   
+   // Auto-reset group kill switches
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      if(g_GroupStats[i].killSwitchTriggered && 
+         g_GroupStats[i].killSwitchTime > 0 &&
+         g_GroupStats[i].totalTrades == 0)  // Only reset if no open trades in group
+      {
+         if(currentTime - g_GroupStats[i].killSwitchTime >= AutoResetDelaySeconds)
+         {
+            g_GroupStats[i].killSwitchTriggered = false;
+            g_GroupStats[i].peakEquity = 0.0;  // Reset peak to allow fresh start
+            g_GroupStats[i].closedPL = 0.0;
+            
+            DebugLog(StringFormat("✅ Auto-reset kill switch for group: %s", 
+                                 g_GroupStats[i].groupId));
+            
+            AppendToAuditLog("GROUP_" + g_GroupStats[i].groupId, "AUTO_RESET", 0.0,
+                           StringFormat("Group kill switch auto-reset after %d seconds", AutoResetDelaySeconds));
+            
+            // Update button colors
+            UpdateGroupButtonColors();
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check Group Floating DD                                          |
 //+------------------------------------------------------------------+
 void CheckGroupFloatingDD()
@@ -650,12 +725,16 @@ void CheckGroupFloatingDD()
             
             int closedCount = CloseAllGroupTrades(groupId, "Group absolute loss");
             g_GroupStats[i].killSwitchTriggered = true;
+            g_GroupStats[i].killSwitchTime = TimeCurrent();
             
             // Trigger kill switch for all providers in group
             for(int j = 0; j < ArraySize(g_ProviderStats); j++)
             {
                if(g_ProviderStats[j].groupId == groupId)
+               {
                   g_ProviderStats[j].killSwitchTriggered = true;
+                  g_ProviderStats[j].killSwitchTime = TimeCurrent();
+               }
             }
             
             AppendToAuditLog("GROUP_" + groupId, "GROUP_ABSOLUTE_LOSS", 0.0,
@@ -685,12 +764,16 @@ void CheckGroupFloatingDD()
          
          int closedCount = CloseAllGroupTrades(groupId, "Group emergency DD");
          g_GroupStats[i].killSwitchTriggered = true;
+         g_GroupStats[i].killSwitchTime = TimeCurrent();
          
          // Trigger kill switch for all providers in group
          for(int j = 0; j < ArraySize(g_ProviderStats); j++)
          {
             if(g_ProviderStats[j].groupId == groupId)
+            {
                g_ProviderStats[j].killSwitchTriggered = true;
+               g_ProviderStats[j].killSwitchTime = TimeCurrent();
+            }
          }
          
          AppendToAuditLog("GROUP_" + groupId, "GROUP_EMERGENCY", dd,
@@ -794,6 +877,7 @@ void CheckProviderFloatingDD()
             }
             
             g_ProviderStats[i].killSwitchTriggered = true;
+            g_ProviderStats[i].killSwitchTime = TimeCurrent();
             
             AppendToAuditLog(pid, "ABSOLUTE_LOSS_KILLSWITCH", 0.0,
                             StringFormat("%s - Closed %d trades", lossReason, closedCount));
@@ -832,6 +916,7 @@ void CheckProviderFloatingDD()
          }
          
          g_ProviderStats[i].killSwitchTriggered = true;
+         g_ProviderStats[i].killSwitchTime = TimeCurrent();
          
          AppendToAuditLog(pid, "EMERGENCY_KILLSWITCH", dd,
                          StringFormat("Closed %d trades, kill switch engaged", closedCount));
@@ -1554,8 +1639,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("=== SignalHarvester Provider DD Manager v3.1 ===");
+   Print("=== SignalHarvester Provider DD Manager v3.2 ===");
    Print("Features: Provider + GROUP Tracking, Peak DD, Chart Buttons, CSV Audit");
+   Print("Fix: Killed providers excluded from group aggregation");
    
    g_AuditFileName = "shra_provider_audit_" + IntegerToString(AccountNumber()) + ".csv";
    
@@ -1621,6 +1707,9 @@ void OnTick()
    ScanOpenOrders();
    UpdateProviderEquityStats();
    CheckProviderFloatingDD();
+   
+   // Auto-reset kill switches if enabled
+   AutoResetKillSwitches();
    
    if(TimeCurrent() - g_LastButtonUpdate >= 5)
    {
