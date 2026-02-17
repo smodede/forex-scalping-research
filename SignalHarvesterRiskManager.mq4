@@ -1,19 +1,34 @@
 //+------------------------------------------------------------------+
 //|                  SignalHarvesterProviderDD_Complete.mq4          |
-//|         Per-Provider Peak DD + All Reset Methods Integrated      |
-//|                    PRODUCTION READY v3.0                         |
+//|         Per-Provider + Group DD + All Reset Methods Integrated   |
+//|                    PRODUCTION READY v3.1                         |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "3.0"
+#property version   "3.1"
 #property strict
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "Provider1,12.0,18.0,22.0;Provider2,12.0,18.0,22.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%;...
+// Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
 // 12% = Early warning, 18% = Damage control, 22% = Hard stop (exceeded historical)
+// NOTE: EA auto-detects ALL signals starting with "sig_" and groups by suffix
+//
+// GROUP TRACKING: All providers ending in _284538 are automatically grouped:
+//   sig_56663716_284538, sig_56663050_284538, sig_56664448_284538, etc.
+//   → All part of Group 284538 with shared thresholds
+// Group DD triggers if COMBINED performance exceeds group thresholds
+
+// Group-Level Protection (tracks combined stats for all providers in same group)
+input bool   EnableGroupLevelProtection = true;  // Enable group DD tracking (e.g., all sig_*_284538)
+input double GroupWarnDDPercent = 15.0;          // Warning threshold for combined group DD
+input double GroupCritDDPercent = 22.0;          // Critical threshold - trim worst providers
+input double GroupEmergDDPercent = 28.0;         // Emergency - kill all providers in group
+input double MaxGroupLossAmount = 5000.0;        // $5,000 max loss per group (2.5% of $200K)
+input double MaxGroupLossPercent = 3.0;          // 3% max loss per group
 
 // Absolute Loss Protection - FTMO SAFETY (10% total account DD limit!)
 input double MaxProviderLossAmount = 2500.0;     // $2,500 per provider (1.25% of $200K)
@@ -37,6 +52,7 @@ input color  ButtonColorBlocked = clrCrimson;
 struct ProviderStats
 {
    string   providerId;
+   string   groupId;              // Group ID extracted from provider (e.g., "284538")
    double   peakEquity;
    double   currentEquity;
    double   closedPL;
@@ -47,6 +63,20 @@ struct ProviderStats
    bool     killSwitchTriggered;
    datetime lastWarnTime;
    int      tradesCount;
+};
+
+struct GroupStats
+{
+   string   groupId;
+   double   peakEquity;
+   double   currentEquity;
+   double   closedPL;
+   double   floatingPL;
+   int      totalProviders;
+   int      activeProviders;      // Providers with open trades
+   int      totalTrades;
+   bool     killSwitchTriggered;
+   datetime lastWarnTime;
 };
 
 struct TradeInfo
@@ -66,10 +96,12 @@ struct TradeInfo
 };
 
 ProviderStats g_ProviderStats[];
+GroupStats    g_GroupStats[];
 TradeInfo     g_OpenTrades[];
 datetime      g_LastStateSave = 0;
 datetime      g_LastClosedPLUpdate = 0;
 datetime      g_LastButtonUpdate = 0;
+datetime      g_LastStatusLog = 0;
 string        g_AuditFileName;
 
 //+------------------------------------------------------------------+
@@ -79,6 +111,64 @@ void DebugLog(string msg)
 {
    if(EnableDebugLogs)
       Print("[SHRA] ", msg);
+}
+
+//+------------------------------------------------------------------+
+//| Extract Group ID from Provider ID                                |
+//+------------------------------------------------------------------+
+string ExtractGroupId(string providerId)
+{
+   // Extract group ID from format: sig_XXXXXXXX_GROUPID
+   int lastUnderscore = StringFind(providerId, "_", StringFind(providerId, "_") + 1);
+   
+   if(lastUnderscore > 0 && lastUnderscore < StringLen(providerId) - 1)
+   {
+      string groupId = StringSubstr(providerId, lastUnderscore + 1);
+      return groupId;
+   }
+   
+   return ""; // No group ID found
+}
+
+//+------------------------------------------------------------------+
+//| Find Group Stats Index                                           |
+//+------------------------------------------------------------------+
+int FindGroupStatsIndex(string groupId)
+{
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      if(g_GroupStats[i].groupId == groupId)
+         return i;
+   }
+   return -1;
+}
+
+//+------------------------------------------------------------------+
+//| Ensure Group Exists                                              |
+//+------------------------------------------------------------------+
+int EnsureGroupExists(string groupId)
+{
+   if(StringLen(groupId) == 0) return -1;
+   
+   int idx = FindGroupStatsIndex(groupId);
+   if(idx >= 0) return idx;
+   
+   int size = ArraySize(g_GroupStats);
+   ArrayResize(g_GroupStats, size + 1);
+   
+   g_GroupStats[size].groupId = groupId;
+   g_GroupStats[size].peakEquity = 0.0;
+   g_GroupStats[size].currentEquity = 0.0;
+   g_GroupStats[size].closedPL = 0.0;
+   g_GroupStats[size].floatingPL = 0.0;
+   g_GroupStats[size].totalProviders = 0;
+   g_GroupStats[size].activeProviders = 0;
+   g_GroupStats[size].totalTrades = 0;
+   g_GroupStats[size].killSwitchTriggered = false;
+   g_GroupStats[size].lastWarnTime = 0;
+   
+   DebugLog(StringFormat("Created group tracker: %s", groupId));
+   return size;
 }
 
 //+------------------------------------------------------------------+
@@ -111,6 +201,7 @@ bool ParseProviderDDSettings()
             ArrayResize(g_ProviderStats, providerCount + 1);
             
             g_ProviderStats[providerCount].providerId = pid;
+            g_ProviderStats[providerCount].groupId = ExtractGroupId(pid);
             g_ProviderStats[providerCount].warnDDPercent = warn;
             g_ProviderStats[providerCount].critDDPercent = crit;
             g_ProviderStats[providerCount].emergDDPercent = emerg;
@@ -121,6 +212,10 @@ bool ParseProviderDDSettings()
             g_ProviderStats[providerCount].killSwitchTriggered = false;
             g_ProviderStats[providerCount].lastWarnTime = 0;
             g_ProviderStats[providerCount].tradesCount = 0;
+            
+            // Ensure group exists
+            if(StringLen(g_ProviderStats[providerCount].groupId) > 0)
+               EnsureGroupExists(g_ProviderStats[providerCount].groupId);
             
             providerCount++;
             
@@ -162,9 +257,22 @@ int EnsureProviderExists(string providerId)
    ArrayResize(g_ProviderStats, size + 1);
    
    g_ProviderStats[size].providerId = providerId;
-   g_ProviderStats[size].warnDDPercent = 2.5;
-   g_ProviderStats[size].critDDPercent = 3.5;
-   g_ProviderStats[size].emergDDPercent = 4.5;
+   g_ProviderStats[size].groupId = ExtractGroupId(providerId);
+   
+   // Use default thresholds from first configured provider (or hardcoded defaults)
+   if(ArraySize(g_ProviderStats) > 1)
+   {
+      g_ProviderStats[size].warnDDPercent = g_ProviderStats[0].warnDDPercent;
+      g_ProviderStats[size].critDDPercent = g_ProviderStats[0].critDDPercent;
+      g_ProviderStats[size].emergDDPercent = g_ProviderStats[0].emergDDPercent;
+   }
+   else
+   {
+      g_ProviderStats[size].warnDDPercent = 12.0;
+      g_ProviderStats[size].critDDPercent = 18.0;
+      g_ProviderStats[size].emergDDPercent = 22.0;
+   }
+   
    g_ProviderStats[size].peakEquity = 0.0;
    g_ProviderStats[size].currentEquity = 0.0;
    g_ProviderStats[size].closedPL = 0.0;
@@ -173,7 +281,15 @@ int EnsureProviderExists(string providerId)
    g_ProviderStats[size].lastWarnTime = 0;
    g_ProviderStats[size].tradesCount = 0;
    
-   DebugLog(StringFormat("Auto-added provider: %s", providerId));
+   // Ensure group exists
+   if(StringLen(g_ProviderStats[size].groupId) > 0)
+      EnsureGroupExists(g_ProviderStats[size].groupId);
+   
+   DebugLog(StringFormat("Auto-added provider: %s (DD thresholds: %.1f%%, %.1f%%, %.1f%%)", 
+                        providerId,
+                        g_ProviderStats[size].warnDDPercent,
+                        g_ProviderStats[size].critDDPercent,
+                        g_ProviderStats[size].emergDDPercent));
    return size;
 }
 
@@ -182,15 +298,46 @@ int EnsureProviderExists(string providerId)
 //+------------------------------------------------------------------+
 string IdentifyProvider(int magic, string comment)
 {
-   // ONLY match configured provider IDs in comments
+   // First check configured providers for exact matches
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
    {
       if(StringFind(comment, g_ProviderStats[i].providerId) >= 0)
          return g_ProviderStats[i].providerId;
    }
    
+   // Auto-detect any provider starting with "sig_"
+   int sigPos = StringFind(comment, "sig_");
+   if(sigPos >= 0)
+   {
+      // Extract provider ID: sig_XXXXXXXX_YYYYYY format
+      string extracted = "";
+      int startPos = sigPos;
+      
+      // Find the end of the provider ID (until space, comma, or end of string)
+      for(int i = startPos; i < StringLen(comment); i++)
+      {
+         string ch = StringSubstr(comment, i, 1);
+         
+         // Provider ID contains: sig_ + numbers + underscores
+         if((ch >= "0" && ch <= "9") || ch == "_" || (ch >= "a" && ch <= "z"))
+         {
+            extracted += ch;
+         }
+         else
+         {
+            break; // Stop at first non-matching character
+         }
+      }
+      
+      // Return the extracted provider ID if valid format (sig_XXXXXX_XXXXXX)
+      if(StringLen(extracted) > 4) // More than just "sig_"
+      {
+         DebugLog(StringFormat("Auto-detected provider: %s from comment: %s", extracted, comment));
+         return extracted;
+      }
+   }
+   
    // Return empty string if no matching provider found
-   // This filters out trades without proper provider identification
    return "";
 }
 
@@ -218,6 +365,8 @@ void ScanOpenOrders()
       
       int size = ArraySize(g_OpenTrades);
       ArrayResize(g_OpenTrades, size + 1);
+      
+      DebugLog(StringFormat("✓ Matched trade #%d to provider: %s", OrderTicket(), providerId));
       
       g_OpenTrades[size].ticket = OrderTicket();
       g_OpenTrades[size].providerId = providerId;
@@ -287,6 +436,123 @@ void UpdateProviderEquityStats()
       if(g_ProviderStats[i].closedPL > g_ProviderStats[i].peakEquity)
          g_ProviderStats[i].peakEquity = g_ProviderStats[i].closedPL;
    }
+   
+   // Update group-level statistics
+   UpdateGroupStats();
+}
+
+//+------------------------------------------------------------------+
+//| Update Group Statistics                                           |
+//+------------------------------------------------------------------+
+void UpdateGroupStats()
+{
+   if(!EnableGroupLevelProtection) return;
+   
+   // Reset all group stats
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      g_GroupStats[i].closedPL = 0.0;
+      g_GroupStats[i].floatingPL = 0.0;
+      g_GroupStats[i].totalProviders = 0;
+      g_GroupStats[i].activeProviders = 0;
+      g_GroupStats[i].totalTrades = 0;
+   }
+   
+   // Aggregate provider stats into groups
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      string groupId = g_ProviderStats[i].groupId;
+      if(StringLen(groupId) == 0) continue;
+      
+      int gIdx = EnsureGroupExists(groupId);
+      if(gIdx < 0) continue;
+      
+      g_GroupStats[gIdx].closedPL += g_ProviderStats[i].closedPL;
+      g_GroupStats[gIdx].floatingPL += g_ProviderStats[i].floatingPL;
+      g_GroupStats[gIdx].totalProviders++;
+      
+      if(g_ProviderStats[i].tradesCount > 0)
+      {
+         g_GroupStats[gIdx].activeProviders++;
+         g_GroupStats[gIdx].totalTrades += g_ProviderStats[i].tradesCount;
+      }
+   }
+   
+   // Calculate current equity and update peaks
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      g_GroupStats[i].currentEquity = g_GroupStats[i].closedPL + g_GroupStats[i].floatingPL;
+      
+      // Update peak based on closed P/L
+      if(g_GroupStats[i].closedPL > g_GroupStats[i].peakEquity)
+         g_GroupStats[i].peakEquity = g_GroupStats[i].closedPL;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Log Provider Status (Diagnostic)                                 |
+//+------------------------------------------------------------------+
+void LogProviderStatus()
+{
+   Print("\n========== PROVIDER STATUS REPORT ==========");
+   Print(StringFormat("Configured Providers: %d", ArraySize(g_ProviderStats)));
+   Print(StringFormat("Tracked Groups: %d", ArraySize(g_GroupStats)));
+   Print(StringFormat("Open Trades Tracked: %d", ArraySize(g_OpenTrades)));
+   
+   // Log group statistics first
+   if(EnableGroupLevelProtection && ArraySize(g_GroupStats) > 0)
+   {
+      Print("\n--- GROUP STATISTICS ---");
+      for(int i = 0; i < ArraySize(g_GroupStats); i++)
+      {
+         double groupDD = 0.0;
+         if(g_GroupStats[i].peakEquity > 0)
+            groupDD = ((g_GroupStats[i].peakEquity - g_GroupStats[i].currentEquity) / g_GroupStats[i].peakEquity) * 100.0;
+         
+         Print(StringFormat("\n[GROUP %s]", g_GroupStats[i].groupId));
+         Print(StringFormat("  Providers: %d (%d active) | Trades: %d",
+                           g_GroupStats[i].totalProviders,
+                           g_GroupStats[i].activeProviders,
+                           g_GroupStats[i].totalTrades));
+         Print(StringFormat("  Peak: $%.2f | Current: $%.2f | DD: %.2f%%",
+                           g_GroupStats[i].peakEquity,
+                           g_GroupStats[i].currentEquity,
+                           groupDD));
+         Print(StringFormat("  Closed P/L: $%.2f | Floating P/L: $%.2f",
+                           g_GroupStats[i].closedPL,
+                           g_GroupStats[i].floatingPL));
+         Print(StringFormat("  Kill Switch: %s",
+                           g_GroupStats[i].killSwitchTriggered ? "ACTIVE" : "Off"));
+      }
+   }
+   
+   Print("\n--- INDIVIDUAL PROVIDERS ---");
+   
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      double dd = 0.0;
+      if(g_ProviderStats[i].peakEquity > 0)
+         dd = ((g_ProviderStats[i].peakEquity - g_ProviderStats[i].currentEquity) / g_ProviderStats[i].peakEquity) * 100.0;
+      
+      Print(StringFormat("\n[%s] (Group: %s)", g_ProviderStats[i].providerId, g_ProviderStats[i].groupId));
+      Print(StringFormat("  Peak: $%.2f | Current: $%.2f | DD: %.2f%%", 
+                        g_ProviderStats[i].peakEquity, 
+                        g_ProviderStats[i].currentEquity, 
+                        dd));
+      Print(StringFormat("  Closed P/L: $%.2f | Floating P/L: $%.2f", 
+                        g_ProviderStats[i].closedPL, 
+                        g_ProviderStats[i].floatingPL));
+      Print(StringFormat("  Open Trades: %d | Kill Switch: %s", 
+                        g_ProviderStats[i].tradesCount,
+                        g_ProviderStats[i].killSwitchTriggered ? "ACTIVE" : "Off"));
+      
+      AppendToAuditLog(g_ProviderStats[i].providerId, "STATUS", dd, 
+                      StringFormat("Peak:%.2f Curr:%.2f Trades:%d", 
+                                  g_ProviderStats[i].peakEquity, 
+                                  g_ProviderStats[i].currentEquity,
+                                  g_ProviderStats[i].tradesCount));
+   }
+   Print("==========================================\n");
 }
 
 //+------------------------------------------------------------------+
@@ -336,10 +602,145 @@ void AppendToAuditLog(string providerId, string eventType, double ddPercent, str
 }
 
 //+------------------------------------------------------------------+
+//| Check Group Floating DD                                          |
+//+------------------------------------------------------------------+
+void CheckGroupFloatingDD()
+{
+   if(!EnableGroupLevelProtection) return;
+   
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      string groupId = g_GroupStats[i].groupId;
+      
+      if(g_GroupStats[i].killSwitchTriggered) continue;
+      
+      double peak = g_GroupStats[i].peakEquity;
+      double current = g_GroupStats[i].currentEquity;
+      
+      // ═══════════════════════════════════════════════════════════════
+      // GROUP ABSOLUTE LOSS PROTECTION
+      // ═══════════════════════════════════════════════════════════════
+      if(current < 0)
+      {
+         bool triggerAbsoluteLoss = false;
+         string lossReason = "";
+         
+         if(current <= -MaxGroupLossAmount)
+         {
+            triggerAbsoluteLoss = true;
+            lossReason = StringFormat("Lost $%.2f (limit: $%.2f)", -current, MaxGroupLossAmount);
+         }
+         
+         double accountEquity = AccountEquity();
+         if(accountEquity > 0)
+         {
+            double lossPercent = (-current / accountEquity) * 100.0;
+            if(lossPercent >= MaxGroupLossPercent)
+            {
+               triggerAbsoluteLoss = true;
+               lossReason = StringFormat("Lost %.2f%% of account (limit: %.2f%%)",
+                                        lossPercent, MaxGroupLossPercent);
+            }
+         }
+         
+         if(triggerAbsoluteLoss)
+         {
+            Print(StringFormat("🚨 GROUP ABSOLUTE LOSS: Group %s - %s - KILL ALL!",
+                              groupId, lossReason));
+            
+            int closedCount = CloseAllGroupTrades(groupId, "Group absolute loss");
+            g_GroupStats[i].killSwitchTriggered = true;
+            
+            // Trigger kill switch for all providers in group
+            for(int j = 0; j < ArraySize(g_ProviderStats); j++)
+            {
+               if(g_ProviderStats[j].groupId == groupId)
+                  g_ProviderStats[j].killSwitchTriggered = true;
+            }
+            
+            AppendToAuditLog("GROUP_" + groupId, "GROUP_ABSOLUTE_LOSS", 0.0,
+                            StringFormat("%s - Closed %d trades", lossReason, closedCount));
+            
+            Alert(StringFormat("Group %s: KILL SWITCH - %s!", groupId, lossReason));
+            
+            // Update button colors immediately
+            UpdateButtonColors();
+            UpdateGroupButtonColors();
+            continue;
+         }
+      }
+      
+      // ═══════════════════════════════════════════════════════════════
+      // GROUP PEAK-BASED DD PROTECTION
+      // ═══════════════════════════════════════════════════════════════
+      if(peak <= 0) continue;
+      
+      double dd = ((peak - current) / peak) * 100.0;
+      if(dd <= 0) continue;
+      
+      // EMERGENCY
+      if(dd >= GroupEmergDDPercent)
+      {
+         Print(StringFormat("🚨 GROUP EMERGENCY: Group %s DD %.2f%% - KILL ALL!", groupId, dd));
+         
+         int closedCount = CloseAllGroupTrades(groupId, "Group emergency DD");
+         g_GroupStats[i].killSwitchTriggered = true;
+         
+         // Trigger kill switch for all providers in group
+         for(int j = 0; j < ArraySize(g_ProviderStats); j++)
+         {
+            if(g_ProviderStats[j].groupId == groupId)
+               g_ProviderStats[j].killSwitchTriggered = true;
+         }
+         
+         AppendToAuditLog("GROUP_" + groupId, "GROUP_EMERGENCY", dd,
+                         StringFormat("Closed %d trades, group kill switch engaged", closedCount));
+         
+         Alert(StringFormat("Group %s: KILL SWITCH at %.2f%% DD!", groupId, dd));
+         
+         // Update button colors immediately
+         UpdateButtonColors();
+         UpdateGroupButtonColors();
+         continue;
+      }
+      
+      // CRITICAL
+      if(dd >= GroupCritDDPercent)
+      {
+         Print(StringFormat("🔴 GROUP CRITICAL: Group %s DD %.2f%% - Trimming worst providers!", groupId, dd));
+         
+         int closedCount = CloseWorstGroupProviders(groupId, 0.3);
+         
+         AppendToAuditLog("GROUP_" + groupId, "GROUP_CRITICAL", dd,
+                         StringFormat("Trimmed worst providers, closed %d trades", closedCount));
+         continue;
+      }
+      
+      // WARNING
+      if(dd >= GroupWarnDDPercent)
+      {
+         if(TimeCurrent() - g_GroupStats[i].lastWarnTime >= 300)
+         {
+            Print(StringFormat("⚠️ GROUP WARNING: Group %s DD %.2f%%", groupId, dd));
+            AppendToAuditLog("GROUP_" + groupId, "GROUP_WARNING", dd,
+                            StringFormat("%d providers, %d trades",
+                                        g_GroupStats[i].totalProviders,
+                                        g_GroupStats[i].totalTrades));
+            g_GroupStats[i].lastWarnTime = TimeCurrent();
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check Provider Floating DD                                       |
 //+------------------------------------------------------------------+
 void CheckProviderFloatingDD()
 {
+   // Check group-level DD first
+   CheckGroupFloatingDD();
+   
+   // Then check individual providers
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
    {
       string pid = g_ProviderStats[i].providerId;
@@ -398,6 +799,10 @@ void CheckProviderFloatingDD()
                             StringFormat("%s - Closed %d trades", lossReason, closedCount));
             
             Alert(StringFormat("Provider %s: KILL SWITCH - %s!", pid, lossReason));
+            
+            // Update button colors immediately
+            UpdateButtonColors();
+            UpdateGroupButtonColors();
             continue;
          }
       }
@@ -432,6 +837,10 @@ void CheckProviderFloatingDD()
                          StringFormat("Closed %d trades, kill switch engaged", closedCount));
          
          Alert(StringFormat("Provider %s: KILL SWITCH at %.2f%% DD!", pid, dd));
+         
+         // Update button colors immediately
+         UpdateButtonColors();
+         UpdateGroupButtonColors();
          continue;
       }
       
@@ -458,6 +867,95 @@ void CheckProviderFloatingDD()
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| Close All Group Trades                                           |
+//+------------------------------------------------------------------+
+int CloseAllGroupTrades(string groupId, string reason)
+{
+   int closedCount = 0;
+   
+   for(int i = ArraySize(g_OpenTrades) - 1; i >= 0; i--)
+   {
+      string pid = g_OpenTrades[i].providerId;
+      int pIdx = FindProviderStatsIndex(pid);
+      
+      if(pIdx >= 0 && g_ProviderStats[pIdx].groupId == groupId)
+      {
+         if(CloseOrder(g_OpenTrades[i].ticket, reason))
+            closedCount++;
+      }
+   }
+   
+   return closedCount;
+}
+
+//+------------------------------------------------------------------+
+//| Close Worst Group Providers                                      |
+//+------------------------------------------------------------------+
+int CloseWorstGroupProviders(string groupId, double percent)
+{
+   // Find all providers in this group and calculate their performance
+   int providerIndices[];
+   double providerPL[];
+   int count = 0;
+   
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      if(g_ProviderStats[i].groupId == groupId && g_ProviderStats[i].tradesCount > 0)
+      {
+         ArrayResize(providerIndices, count + 1);
+         ArrayResize(providerPL, count + 1);
+         providerIndices[count] = i;
+         providerPL[count] = g_ProviderStats[i].floatingPL;
+         count++;
+      }
+   }
+   
+   if(count == 0) return 0;
+   
+   // Sort by floating P/L (worst first)
+   for(int i = 0; i < count - 1; i++)
+   {
+      for(int j = 0; j < count - i - 1; j++)
+      {
+         if(providerPL[j] > providerPL[j+1])
+         {
+            int tempIdx = providerIndices[j];
+            providerIndices[j] = providerIndices[j+1];
+            providerIndices[j+1] = tempIdx;
+            
+            double tempPL = providerPL[j];
+            providerPL[j] = providerPL[j+1];
+            providerPL[j+1] = tempPL;
+         }
+      }
+   }
+   
+   // Close all trades from worst performing providers
+   int providersToClose = (int)MathMax(1, MathCeil(count * percent));
+   int totalClosed = 0;
+   
+   for(int i = 0; i < providersToClose && i < count; i++)
+   {
+      int pIdx = providerIndices[i];
+      string pid = g_ProviderStats[pIdx].providerId;
+      
+      for(int j = ArraySize(g_OpenTrades) - 1; j >= 0; j--)
+      {
+         if(g_OpenTrades[j].providerId == pid)
+         {
+            if(CloseOrder(g_OpenTrades[j].ticket, "Group DD - worst provider trim"))
+               totalClosed++;
+         }
+      }
+      
+      DebugLog(StringFormat("Trimmed provider %s from group %s (PL: %.2f)",
+                           pid, groupId, providerPL[i]));
+   }
+   
+   return totalClosed;
 }
 
 //+------------------------------------------------------------------+
@@ -531,6 +1029,50 @@ bool CloseOrder(int ticket, string reason)
 }
 
 //+------------------------------------------------------------------+
+//| Reset Group Kill Switch                                          |
+//+------------------------------------------------------------------+
+void ResetGroupKillSwitch(string groupId)
+{
+   int gIdx = FindGroupStatsIndex(groupId);
+   
+   if(gIdx < 0)
+   {
+      DebugLog(StringFormat("Group %s not found", groupId));
+      return;
+   }
+   
+   double oldPeak = g_GroupStats[gIdx].peakEquity;
+   double currentEquity = g_GroupStats[gIdx].currentEquity;
+   
+   // Reset group peak
+   g_GroupStats[gIdx].peakEquity = currentEquity;
+   g_GroupStats[gIdx].killSwitchTriggered = false;
+   
+   // Reset all provider kill switches in this group
+   int resetCount = 0;
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      if(g_ProviderStats[i].groupId == groupId)
+      {
+         g_ProviderStats[i].peakEquity = g_ProviderStats[i].currentEquity;
+         g_ProviderStats[i].killSwitchTriggered = false;
+         resetCount++;
+      }
+   }
+   
+   AppendToAuditLog("GROUP_" + groupId, "GROUP_RESET", 0.0,
+                   StringFormat("Group reset - Peak: %.2f → %.2f, %d providers reset",
+                               oldPeak, currentEquity, resetCount));
+   
+   Alert(StringFormat("Group %s: RESET - %d providers (Peak: $%.2f → $%.2f)",
+                     groupId, resetCount, oldPeak, currentEquity));
+   DebugLog(StringFormat("Group %s reset: %d providers", groupId, resetCount));
+   
+   // Save state immediately so global variables update
+   SavePersistedState();
+}
+
+//+------------------------------------------------------------------+
 //| Reset Provider Kill Switch                                       |
 //+------------------------------------------------------------------+
 void ResetProviderKillSwitch(string providerId)
@@ -561,6 +1103,9 @@ void ResetProviderKillSwitch(string providerId)
    
    Alert(StringFormat("Provider %s: Kill switch RESET (Peak: $%.2f → $%.2f)", providerId, oldPeak, currentEquity));
    DebugLog(StringFormat("Kill switch reset: %s (Peak reset to current equity)", providerId));
+   
+   // Save state immediately so global variables update
+   SavePersistedState();
 }
 
 //+------------------------------------------------------------------+
@@ -575,6 +1120,16 @@ void SavePersistedState()
       
       GlobalVariableSet(prefix + "PeakEquity", g_ProviderStats[i].peakEquity);
       GlobalVariableSet(prefix + "KillSwitch", g_ProviderStats[i].killSwitchTriggered ? 1.0 : 0.0);
+   }
+   
+   // Save group stats
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      string prefix = "SHRA_" + IntegerToString(AccountNumber()) + "_GROUP_" + 
+                      g_GroupStats[i].groupId + "_";
+      
+      GlobalVariableSet(prefix + "PeakEquity", g_GroupStats[i].peakEquity);
+      GlobalVariableSet(prefix + "KillSwitch", g_GroupStats[i].killSwitchTriggered ? 1.0 : 0.0);
    }
 }
 
@@ -596,6 +1151,23 @@ void LoadPersistedState()
       if(GlobalVariableCheck(prefix + "KillSwitch"))
       {
          g_ProviderStats[i].killSwitchTriggered = (GlobalVariableGet(prefix + "KillSwitch") > 0);
+      }
+   }
+   
+   // Load group stats
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      string prefix = "SHRA_" + IntegerToString(AccountNumber()) + "_GROUP_" + 
+                      g_GroupStats[i].groupId + "_";
+      
+      if(GlobalVariableCheck(prefix + "PeakEquity"))
+      {
+         g_GroupStats[i].peakEquity = GlobalVariableGet(prefix + "PeakEquity");
+      }
+      
+      if(GlobalVariableCheck(prefix + "KillSwitch"))
+      {
+         g_GroupStats[i].killSwitchTriggered = (GlobalVariableGet(prefix + "KillSwitch") > 0);
       }
    }
 }
@@ -643,9 +1215,36 @@ void CreateChartButtons()
       }
    }
    
+   // Group reset buttons (if group-level protection enabled)
+   int groupBtnY = yPos + (ArraySize(g_ProviderStats) * spacing) + 10;
+   
+   if(EnableGroupLevelProtection && ArraySize(g_GroupStats) > 0)
+   {
+      for(int i = 0; i < ArraySize(g_GroupStats); i++)
+      {
+         string groupBtnName = "SHRA_btnResetGroup_" + g_GroupStats[i].groupId;
+         
+         if(ObjectCreate(0, groupBtnName, OBJ_BUTTON, 0, 0, 0))
+         {
+            ObjectSetInteger(0, groupBtnName, OBJPROP_XDISTANCE, xPos);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_YDISTANCE, groupBtnY + (i * spacing));
+            ObjectSetInteger(0, groupBtnName, OBJPROP_XSIZE, btnWidth);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_YSIZE, btnHeight);
+            ObjectSetString(0, groupBtnName, OBJPROP_TEXT, "🔄 Reset Group " + g_GroupStats[i].groupId);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_FONTSIZE, 9);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_BGCOLOR, clrDarkBlue);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_COLOR, clrWhite);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, groupBtnName, OBJPROP_SELECTABLE, false);
+         }
+      }
+      
+      groupBtnY += ArraySize(g_GroupStats) * spacing + 5;
+   }
+   
    // Reset ALL button
    string resetAllBtn = "SHRA_btnResetAll";
-   int allBtnY = yPos + (ArraySize(g_ProviderStats) * spacing) + 10;
+   int allBtnY = groupBtnY;
    
    if(ObjectCreate(0, resetAllBtn, OBJ_BUTTON, 0, 0, 0))
    {
@@ -667,10 +1266,44 @@ void CreateChartButtons()
    {
       ObjectSetInteger(0, instrLabel, OBJPROP_XDISTANCE, xPos);
       ObjectSetInteger(0, instrLabel, OBJPROP_YDISTANCE, allBtnY + 40);
-      ObjectSetString(0, instrLabel, OBJPROP_TEXT, "Keyboard: R = Reset All, 1-9 = Reset #");
+      ObjectSetString(0, instrLabel, OBJPROP_TEXT, "Keyboard: R = Reset All, G = Reset Group, 1-9 = Reset #");
       ObjectSetInteger(0, instrLabel, OBJPROP_FONTSIZE, 8);
       ObjectSetInteger(0, instrLabel, OBJPROP_COLOR, clrGray);
       ObjectSetInteger(0, instrLabel, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| UPDATE GROUP BUTTON COLORS                                       |
+//+------------------------------------------------------------------+
+void UpdateGroupButtonColors()
+{
+   if(!ShowChartButtons || !EnableGroupLevelProtection) return;
+   
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      string btnName = "SHRA_btnResetGroup_" + g_GroupStats[i].groupId;
+      
+      if(ObjectFind(0, btnName) >= 0)
+      {
+         double groupDD = 0.0;
+         if(g_GroupStats[i].peakEquity > 0)
+            groupDD = ((g_GroupStats[i].peakEquity - g_GroupStats[i].currentEquity) / g_GroupStats[i].peakEquity) * 100.0;
+         
+         string label = StringFormat("🔄 Reset Group %s (DD:%.1f%%)",
+                                     g_GroupStats[i].groupId, groupDD);
+         
+         color btnColor = clrDarkBlue;
+         if(g_GroupStats[i].killSwitchTriggered)
+            btnColor = ButtonColorBlocked;
+         else if(groupDD >= GroupCritDDPercent)
+            btnColor = clrCrimson;
+         else if(groupDD >= GroupWarnDDPercent)
+            btnColor = clrOrange;
+         
+         ObjectSetString(0, btnName, OBJPROP_TEXT, label);
+         ObjectSetInteger(0, btnName, OBJPROP_BGCOLOR, btnColor);
+      }
    }
 }
 
@@ -716,6 +1349,11 @@ void DeleteChartButtons()
    {
       ObjectDelete(0, "SHRA_btnReset_" + g_ProviderStats[i].providerId);
    }
+   
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      ObjectDelete(0, "SHRA_btnResetGroup_" + g_GroupStats[i].groupId);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -726,8 +1364,34 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    // BUTTON CLICKS
    if(id == CHARTEVENT_OBJECT_CLICK)
    {
+      // Group reset button
+      if(StringFind(sparam, "SHRA_btnResetGroup_") == 0)
+      {
+         string groupId = StringSubstr(sparam, 19);
+         
+         int gIdx = FindGroupStatsIndex(groupId);
+         if(gIdx >= 0)
+         {
+            int response = MessageBox(
+               StringFormat("Reset kill switch for GROUP:\n\n%s\n\n(%d providers)\n\nRe-enable trading?",
+                           groupId, g_GroupStats[gIdx].totalProviders),
+               "Confirm Group Reset",
+               MB_YESNO | MB_ICONQUESTION
+            );
+            
+            if(response == IDYES)
+            {
+               ResetGroupKillSwitch(groupId);
+               UpdateButtonColors();
+               UpdateGroupButtonColors();
+            }
+         }
+         
+         ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+      }
+      
       // Individual provider reset
-      if(StringFind(sparam, "SHRA_btnReset_") == 0)
+      if(StringFind(sparam, "SHRA_btnReset_") == 0 && StringFind(sparam, "Group") < 0)
       {
          string providerId = StringSubstr(sparam, 14);
          
@@ -741,6 +1405,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          {
             ResetProviderKillSwitch(providerId);
             UpdateButtonColors();
+            UpdateGroupButtonColors();
          }
          
          ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
@@ -767,7 +1432,19 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                }
             }
             
+            // Also reset all groups
+            for(int i = 0; i < ArraySize(g_GroupStats); i++)
+            {
+               if(g_GroupStats[i].killSwitchTriggered)
+               {
+                  g_GroupStats[i].killSwitchTriggered = false;
+                  g_GroupStats[i].peakEquity = g_GroupStats[i].currentEquity;
+               }
+            }
+            
             UpdateButtonColors();
+            UpdateGroupButtonColors();
+            SavePersistedState();
             Alert(StringFormat("Reset %d provider kill switches", resetCount));
          }
          
@@ -799,8 +1476,41 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                }
             }
             
+            // Also reset all groups
+            for(int i = 0; i < ArraySize(g_GroupStats); i++)
+            {
+               if(g_GroupStats[i].killSwitchTriggered)
+               {
+                  g_GroupStats[i].killSwitchTriggered = false;
+                  g_GroupStats[i].peakEquity = g_GroupStats[i].currentEquity;
+               }
+            }
+            
             UpdateButtonColors();
+            UpdateGroupButtonColors();
+            SavePersistedState();
             Alert(StringFormat("Reset %d provider kill switches (R key)", resetCount));
+         }
+      }
+      
+      // Press 'G' to reset first group
+      if((lparam == 'G' || lparam == 'g') && ArraySize(g_GroupStats) > 0)
+      {
+         string groupId = g_GroupStats[0].groupId;
+         
+         int response = MessageBox(
+            StringFormat("Reset GROUP %s kill switch?\n\n(%d providers)\n\n(Keyboard shortcut: G)",
+                        groupId, g_GroupStats[0].totalProviders),
+            "Confirm Group Reset",
+            MB_YESNO | MB_ICONQUESTION
+         );
+         
+         if(response == IDYES)
+         {
+            ResetGroupKillSwitch(groupId);
+            UpdateButtonColors();
+            UpdateGroupButtonColors();
+            Alert(StringFormat("Reset group: %s (G key)", groupId));
          }
       }
       
@@ -826,6 +1536,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                {
                   ResetProviderKillSwitch(pid);
                   UpdateButtonColors();
+                  UpdateGroupButtonColors();
                   Alert(StringFormat("Reset provider: %s (key %d)", pid, providerIdx + 1));
                }
             }
@@ -843,8 +1554,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("=== SignalHarvester Provider DD Manager v3.0 ===");
-   Print("Features: Peak DD, Chart Buttons, Keyboard Shortcuts, CSV Audit");
+   Print("=== SignalHarvester Provider DD Manager v3.1 ===");
+   Print("Features: Provider + GROUP Tracking, Peak DD, Chart Buttons, CSV Audit");
    
    g_AuditFileName = "shra_provider_audit_" + IntegerToString(AccountNumber()) + ".csv";
    
@@ -859,14 +1570,27 @@ int OnInit()
    g_LastStateSave = TimeCurrent();
    g_LastClosedPLUpdate = TimeCurrent();
    g_LastButtonUpdate = TimeCurrent();
+   g_LastStatusLog = TimeCurrent();
    
    CreateChartButtons();
    UpdateButtonColors();
+   UpdateGroupButtonColors();
    
    AppendToAuditLog("SYSTEM", "EA_START", 0.0, 
-                    StringFormat("Initialized with %d providers", ArraySize(g_ProviderStats)));
+                    StringFormat("Initialized with %d providers, %d groups", 
+                                ArraySize(g_ProviderStats), ArraySize(g_GroupStats)));
    
    Print(StringFormat("✓ Initialized %d providers", ArraySize(g_ProviderStats)));
+   Print(StringFormat("✓ Group-level tracking: %d groups detected", ArraySize(g_GroupStats)));
+   if(ArraySize(g_GroupStats) > 0)
+   {
+      for(int i = 0; i < ArraySize(g_GroupStats); i++)
+      {
+         Print(StringFormat("  - Group %s: %d providers", 
+                           g_GroupStats[i].groupId, 
+                           g_GroupStats[i].totalProviders));
+      }
+   }
    Print(StringFormat("✓ Chart buttons: %s", ShowChartButtons ? "Enabled" : "Disabled"));
    Print(StringFormat("✓ Keyboard shortcuts: %s", EnableKeyboardShortcuts ? "Enabled" : "Disabled"));
    Print(StringFormat("✓ Audit log: %s", g_AuditFileName));
@@ -901,6 +1625,7 @@ void OnTick()
    if(TimeCurrent() - g_LastButtonUpdate >= 5)
    {
       UpdateButtonColors();
+      UpdateGroupButtonColors();
       g_LastButtonUpdate = TimeCurrent();
    }
    
@@ -908,6 +1633,13 @@ void OnTick()
    {
       SavePersistedState();
       g_LastStateSave = TimeCurrent();
+   }
+   
+   // Log provider status every 5 minutes for diagnostics
+   if(TimeCurrent() - g_LastStatusLog >= 300)
+   {
+      LogProviderStatus();
+      g_LastStatusLog = TimeCurrent();
    }
 }
 //+------------------------------------------------------------------+
