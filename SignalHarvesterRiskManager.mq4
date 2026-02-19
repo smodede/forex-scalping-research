@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0;sig_286289,12.0,18.0,22.0,20.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0;sig_286289,12.0,18.0,22.0,20.0;sig_276594,12.0,18.0,22.0,20.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
