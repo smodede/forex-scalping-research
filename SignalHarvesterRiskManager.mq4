@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0;sig_286289,12.0,18.0,22.0,20.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -421,8 +421,12 @@ void UpdateProviderEquityStats()
    
    if(TimeCurrent() - g_LastClosedPLUpdate >= RecalcClosedPLIntervalSec)
    {
-      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
-         g_ProviderStats[i].closedPL = 0.0;
+      // BUG FIX: Use temporary array to avoid false DD spikes during recalculation
+      // Previous bug: Reset closedPL to 0 first, creating timing window where
+      // DD calculations saw $0 closed P/L and triggered false kill switches
+      double tempClosedPL[];
+      ArrayResize(tempClosedPL, ArraySize(g_ProviderStats));
+      ArrayInitialize(tempClosedPL, 0.0);
       
       for(int i = 0; i < OrdersHistoryTotal(); i++)
       {
@@ -436,8 +440,12 @@ void UpdateProviderEquityStats()
          
          int idx = EnsureProviderExists(pid);
          
-         g_ProviderStats[idx].closedPL += OrderProfit() + OrderSwap() + OrderCommission();
+         tempClosedPL[idx] += OrderProfit() + OrderSwap() + OrderCommission();
       }
+      
+      // Atomic update: All providers updated simultaneously (no timing window)
+      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+         g_ProviderStats[i].closedPL = tempClosedPL[i];
       
       g_LastClosedPLUpdate = TimeCurrent();
    }
