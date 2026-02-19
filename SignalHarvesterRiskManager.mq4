@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0;sig_284214,12.0,18.0,22.0;sig_284720,12.0,18.0,22.0;sig_286254,12.0,18.0,22.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -41,7 +41,7 @@ input bool   ShowChartButtons = true;           // Show reset buttons on chart
 input bool   EnableKeyboardShortcuts = true;    // Enable keyboard shortcuts
 
 // Auto-Reset Settings
-input bool   EnableAutoResetAfterKillSwitch = false;  // Auto-reset kill switches after trigger
+input bool   EnableAutoResetAfterKillSwitch = true;  // Auto-reset kill switches after trigger
 input int    AutoResetDelaySeconds = 300;             // Delay before auto-reset (5 minutes default)
 
 // UI Settings
