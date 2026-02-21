@@ -10,11 +10,12 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0;sig_284214,12.0,18.0,22.0;sig_284720,12.0,18.0,22.0;sig_286254,12.0,18.0,22.0";
-// Format: ProviderID,warnDD%,critDD%,emergDD%;...
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0;sig_286289,12.0,18.0,22.0,20.0;sig_276594,12.0,18.0,22.0,20.0";
+// Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
 // 12% = Early warning, 18% = Damage control, 22% = Hard stop (exceeded historical)
+// minPeak = Minimum closed P/L before DD tracking starts (e.g., 20.0 = $20)
 // NOTE: EA auto-detects ALL signals starting with "sig_" and groups by suffix
 //
 // GROUP TRACKING: All providers ending in _284538 are automatically grouped:
@@ -64,6 +65,7 @@ struct ProviderStats
    double   warnDDPercent;
    double   critDDPercent;
    double   emergDDPercent;
+   double   minPeakThreshold;     // Minimum peak before DD tracking starts
    bool     killSwitchTriggered;
    datetime lastWarnTime;
    datetime killSwitchTime;       // When kill switch was triggered
@@ -196,12 +198,13 @@ bool ParseProviderDDSettings()
       string parts[];
       int numParts = StringSplit(block, ',', parts);
       
-      if(numParts == 4)
+      if(numParts == 4 || numParts == 5)
       {
          string pid = parts[0];
          double warn = StringToDouble(parts[1]);
          double crit = StringToDouble(parts[2]);
          double emerg = StringToDouble(parts[3]);
+         double minPeak = (numParts == 5) ? StringToDouble(parts[4]) : 0.0;
          
          if(warn > 0 && crit > warn && emerg > crit)
          {
@@ -212,6 +215,7 @@ bool ParseProviderDDSettings()
             g_ProviderStats[providerCount].warnDDPercent = warn;
             g_ProviderStats[providerCount].critDDPercent = crit;
             g_ProviderStats[providerCount].emergDDPercent = emerg;
+            g_ProviderStats[providerCount].minPeakThreshold = minPeak;
             g_ProviderStats[providerCount].peakEquity = 0.0;
             g_ProviderStats[providerCount].currentEquity = 0.0;
             g_ProviderStats[providerCount].closedPL = 0.0;
@@ -227,8 +231,8 @@ bool ParseProviderDDSettings()
             
             providerCount++;
             
-            DebugLog(StringFormat("Parsed provider: %s (Warn:%.1f%%, Crit:%.1f%%, Emerg:%.1f%%)",
-                    pid, warn, crit, emerg));
+            DebugLog(StringFormat("Parsed provider: %s (Warn:%.1f%%, Crit:%.1f%%, Emerg:%.1f%%, MinPeak:$%.2f)",
+                    pid, warn, crit, emerg, minPeak));
          }
       }
       
@@ -273,12 +277,14 @@ int EnsureProviderExists(string providerId)
       g_ProviderStats[size].warnDDPercent = g_ProviderStats[0].warnDDPercent;
       g_ProviderStats[size].critDDPercent = g_ProviderStats[0].critDDPercent;
       g_ProviderStats[size].emergDDPercent = g_ProviderStats[0].emergDDPercent;
+      g_ProviderStats[size].minPeakThreshold = g_ProviderStats[0].minPeakThreshold;
    }
    else
    {
       g_ProviderStats[size].warnDDPercent = 12.0;
       g_ProviderStats[size].critDDPercent = 18.0;
       g_ProviderStats[size].emergDDPercent = 22.0;
+      g_ProviderStats[size].minPeakThreshold = 0.0;
    }
    
    g_ProviderStats[size].peakEquity = 0.0;
@@ -415,8 +421,12 @@ void UpdateProviderEquityStats()
    
    if(TimeCurrent() - g_LastClosedPLUpdate >= RecalcClosedPLIntervalSec)
    {
-      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
-         g_ProviderStats[i].closedPL = 0.0;
+      // BUG FIX: Use temporary array to avoid false DD spikes during recalculation
+      // Previous bug: Reset closedPL to 0 first, creating timing window where
+      // DD calculations saw $0 closed P/L and triggered false kill switches
+      double tempClosedPL[];
+      ArrayResize(tempClosedPL, ArraySize(g_ProviderStats));
+      ArrayInitialize(tempClosedPL, 0.0);
       
       for(int i = 0; i < OrdersHistoryTotal(); i++)
       {
@@ -430,8 +440,12 @@ void UpdateProviderEquityStats()
          
          int idx = EnsureProviderExists(pid);
          
-         g_ProviderStats[idx].closedPL += OrderProfit() + OrderSwap() + OrderCommission();
+         tempClosedPL[idx] += OrderProfit() + OrderSwap() + OrderCommission();
       }
+      
+      // Atomic update: All providers updated simultaneously (no timing window)
+      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+         g_ProviderStats[i].closedPL = tempClosedPL[i];
       
       g_LastClosedPLUpdate = TimeCurrent();
    }
@@ -752,7 +766,15 @@ void CheckGroupFloatingDD()
       // ═══════════════════════════════════════════════════════════════
       // GROUP PEAK-BASED DD PROTECTION
       // ═══════════════════════════════════════════════════════════════
-      if(peak <= 0) continue;
+      // Check minimum peak threshold (calculated from provider minPeaks in group)
+      double groupMinPeak = 0.0;
+      for(int p = 0; p < ArraySize(g_ProviderStats); p++)
+      {
+         if(g_ProviderStats[p].groupId == groupId && g_ProviderStats[p].minPeakThreshold > groupMinPeak)
+            groupMinPeak = g_ProviderStats[p].minPeakThreshold;
+      }
+      
+      if(peak <= 0 || peak < groupMinPeak) continue;
       
       double dd = ((peak - current) / peak) * 100.0;
       if(dd <= 0) continue;
@@ -895,6 +917,18 @@ void CheckProviderFloatingDD()
       // PEAK-BASED DD PROTECTION (for providers with profit history)
       // ═══════════════════════════════════════════════════════════════
       if(peak <= 0) continue;  // Skip peak DD if provider never profitable
+      
+      // Check minimum peak threshold before calculating DD
+      if(peak < g_ProviderStats[i].minPeakThreshold)
+      {
+         if(TimeCurrent() - g_ProviderStats[i].lastWarnTime >= 600)
+         {
+            DebugLog(StringFormat("Provider %s: Peak $%.2f below threshold $%.2f - DD tracking disabled",
+                                 pid, peak, g_ProviderStats[i].minPeakThreshold));
+            g_ProviderStats[i].lastWarnTime = TimeCurrent();
+         }
+         continue;
+      }
       
       double dd = ((peak - current) / peak) * 100.0;
       
