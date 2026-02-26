@@ -440,6 +440,13 @@ void UpdateProviderEquityStats()
          
          int idx = EnsureProviderExists(pid);
          
+         // BUG FIX: Resize tempClosedPL if new provider was added
+         // EnsureProviderExists() can grow g_ProviderStats array dynamically
+         if(idx >= ArraySize(tempClosedPL))
+         {
+            ArrayResize(tempClosedPL, ArraySize(g_ProviderStats));
+         }
+         
          tempClosedPL[idx] += OrderProfit() + OrderSwap() + OrderCommission();
       }
       
