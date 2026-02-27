@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,20.0;sig_284214,12.0,18.0,22.0,20.0;sig_284720,12.0,18.0,22.0,20.0;sig_286254,12.0,18.0,22.0,20.0;sig_286289,12.0,18.0,22.0,20.0;sig_276594,12.0,18.0,22.0,20.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,1000.0;sig_284214,12.0,18.0,22.0,1000.0;sig_284720,12.0,18.0,22.0,1000.0;sig_286254,12.0,18.0,22.0,1000.0;sig_286289,12.0,18.0,22.0,1000.0;sig_276594,12.0,18.0,22.0,1000.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -1260,6 +1260,25 @@ void SavePersistedState()
 }
 
 //+------------------------------------------------------------------+
+//| Get Group Minimum Peak Threshold                                 |
+//+------------------------------------------------------------------+
+double GetGroupMinPeak(string groupId)
+{
+   double groupMinPeak = 0.0;
+   
+   for(int p = 0; p < ArraySize(g_ProviderStats); p++)
+   {
+      if(g_ProviderStats[p].groupId == groupId && 
+         g_ProviderStats[p].minPeakThreshold > groupMinPeak)
+      {
+         groupMinPeak = g_ProviderStats[p].minPeakThreshold;
+      }
+   }
+   
+   return groupMinPeak;
+}
+
+//+------------------------------------------------------------------+
 //| Load State from GlobalVariables                                  |
 //+------------------------------------------------------------------+
 void LoadPersistedState()
@@ -1278,6 +1297,29 @@ void LoadPersistedState()
       {
          g_ProviderStats[i].killSwitchTriggered = (GlobalVariableGet(prefix + "KillSwitch") > 0);
       }
+      
+      // BUG FIX: Clear provider kill switches if peak is below minPeakThreshold
+      // This prevents invalid kill switches when minPeak settings are raised
+      if(g_ProviderStats[i].killSwitchTriggered && 
+         g_ProviderStats[i].peakEquity > 0 &&
+         g_ProviderStats[i].peakEquity < g_ProviderStats[i].minPeakThreshold)
+      {
+         g_ProviderStats[i].killSwitchTriggered = false;
+         g_ProviderStats[i].killSwitchTime = 0;
+         
+         // Clear the GlobalVariable too
+         GlobalVariableSet(prefix + "KillSwitch", 0.0);
+         
+         DebugLog(StringFormat("✓ Cleared kill switch for %s - peak $%.2f below minPeak $%.2f",
+                              g_ProviderStats[i].providerId,
+                              g_ProviderStats[i].peakEquity,
+                              g_ProviderStats[i].minPeakThreshold));
+         
+         AppendToAuditLog(g_ProviderStats[i].providerId, "AUTO_RESET", 0.0,
+                         StringFormat("Kill switch cleared - peak below minPeak threshold (%.2f < %.2f)",
+                                     g_ProviderStats[i].peakEquity,
+                                     g_ProviderStats[i].minPeakThreshold));
+      }
    }
    
    // Load group stats
@@ -1294,6 +1336,46 @@ void LoadPersistedState()
       if(GlobalVariableCheck(prefix + "KillSwitch"))
       {
          g_GroupStats[i].killSwitchTriggered = (GlobalVariableGet(prefix + "KillSwitch") > 0);
+      }
+      
+      // BUG FIX: Clear group kill switches if peak is below group's minPeakThreshold
+      // This prevents invalid kill switches when minPeak settings are raised
+      double groupMinPeak = GetGroupMinPeak(g_GroupStats[i].groupId);
+      
+      if(g_GroupStats[i].killSwitchTriggered && 
+         g_GroupStats[i].peakEquity > 0 &&
+         g_GroupStats[i].peakEquity < groupMinPeak)
+      {
+         g_GroupStats[i].killSwitchTriggered = false;
+         g_GroupStats[i].killSwitchTime = 0;
+         
+         // Clear the GlobalVariable too
+         GlobalVariableSet(prefix + "KillSwitch", 0.0);
+         
+         // Also clear kill switches for all providers in this group
+         for(int j = 0; j < ArraySize(g_ProviderStats); j++)
+         {
+            if(g_ProviderStats[j].groupId == g_GroupStats[i].groupId && 
+               g_ProviderStats[j].killSwitchTriggered)
+            {
+               g_ProviderStats[j].killSwitchTriggered = false;
+               g_ProviderStats[j].killSwitchTime = 0;
+               
+               string provPrefix = "SHRA_" + IntegerToString(AccountNumber()) + "_" + 
+                                   g_ProviderStats[j].providerId + "_";
+               GlobalVariableSet(provPrefix + "KillSwitch", 0.0);
+            }
+         }
+         
+         DebugLog(StringFormat("✓ Cleared kill switch for GROUP_%s - peak $%.2f below minPeak $%.2f",
+                              g_GroupStats[i].groupId,
+                              g_GroupStats[i].peakEquity,
+                              groupMinPeak));
+         
+         AppendToAuditLog("GROUP_" + g_GroupStats[i].groupId, "GROUP_RESET", 0.0,
+                         StringFormat("Kill switch cleared - peak below minPeak threshold (%.2f < %.2f)",
+                                     g_GroupStats[i].peakEquity,
+                                     groupMinPeak));
       }
    }
 }
