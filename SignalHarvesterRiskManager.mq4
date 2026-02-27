@@ -37,7 +37,7 @@ input double MaxProviderLossPercent = 1.5;       // 1.5% max loss per provider (
 input bool   EnableAbsoluteLossProtection = true; // CRITICAL: Protects against bad signals
 input int    StateSaveIntervalSeconds = 300;
 input int    RecalcClosedPLIntervalSec = 600;
-input bool   EnableDebugLogs = true;
+input bool   EnableDebugLogs = false;
 input bool   ShowChartButtons = true;           // Show reset buttons on chart
 input bool   EnableKeyboardShortcuts = true;    // Enable keyboard shortcuts
 
@@ -774,14 +774,10 @@ void CheckGroupFloatingDD()
       // GROUP PEAK-BASED DD PROTECTION
       // ═══════════════════════════════════════════════════════════════
       // Check minimum peak threshold (calculated from provider minPeaks in group)
-      double groupMinPeak = 0.0;
-      for(int p = 0; p < ArraySize(g_ProviderStats); p++)
-      {
-         if(g_ProviderStats[p].groupId == groupId && g_ProviderStats[p].minPeakThreshold > groupMinPeak)
-            groupMinPeak = g_ProviderStats[p].minPeakThreshold;
-      }
+      double groupMinPeak = GetGroupMinPeak(groupId);
       
-      if(peak <= 0 || peak < groupMinPeak) continue;
+      // Skip DD checks if peak hasn't reached minimum threshold
+      if(peak <= 0 || peak <= groupMinPeak) continue;
       
       double dd = ((peak - current) / peak) * 100.0;
       if(dd <= 0) continue;
@@ -789,7 +785,8 @@ void CheckGroupFloatingDD()
       // EMERGENCY
       if(dd >= GroupEmergDDPercent)
       {
-         Print(StringFormat("🚨 GROUP EMERGENCY: Group %s DD %.2f%% - KILL ALL!", groupId, dd));
+         Print(StringFormat("🚨 GROUP EMERGENCY: Group %s DD %.2f%% (Peak: $%.2f, Current: $%.2f, MinPeak: $%.2f) - KILL ALL!",
+                           groupId, dd, peak, current, groupMinPeak));
          
          int closedCount = CloseAllGroupTrades(groupId, "Group emergency DD");
          g_GroupStats[i].killSwitchTriggered = true;
@@ -806,7 +803,8 @@ void CheckGroupFloatingDD()
          }
          
          AppendToAuditLog("GROUP_" + groupId, "GROUP_EMERGENCY", dd,
-                         StringFormat("Closed %d trades, group kill switch engaged", closedCount));
+                         StringFormat("Peak: %.2f, Current: %.2f, MinPeak: %.2f, Closed %d trades",
+                                     peak, current, groupMinPeak, closedCount));
          
          Alert(StringFormat("Group %s: KILL SWITCH at %.2f%% DD!", groupId, dd));
          
@@ -926,7 +924,7 @@ void CheckProviderFloatingDD()
       if(peak <= 0) continue;  // Skip peak DD if provider never profitable
       
       // Check minimum peak threshold before calculating DD
-      if(peak < g_ProviderStats[i].minPeakThreshold)
+      if(peak <= g_ProviderStats[i].minPeakThreshold)
       {
          if(TimeCurrent() - g_ProviderStats[i].lastWarnTime >= 600)
          {
@@ -1302,7 +1300,7 @@ void LoadPersistedState()
       // This prevents invalid kill switches when minPeak settings are raised
       if(g_ProviderStats[i].killSwitchTriggered && 
          g_ProviderStats[i].peakEquity > 0 &&
-         g_ProviderStats[i].peakEquity < g_ProviderStats[i].minPeakThreshold)
+         g_ProviderStats[i].peakEquity <= g_ProviderStats[i].minPeakThreshold)
       {
          g_ProviderStats[i].killSwitchTriggered = false;
          g_ProviderStats[i].killSwitchTime = 0;
@@ -1344,7 +1342,7 @@ void LoadPersistedState()
       
       if(g_GroupStats[i].killSwitchTriggered && 
          g_GroupStats[i].peakEquity > 0 &&
-         g_GroupStats[i].peakEquity < groupMinPeak)
+         g_GroupStats[i].peakEquity <= groupMinPeak)
       {
          g_GroupStats[i].killSwitchTriggered = false;
          g_GroupStats[i].killSwitchTime = 0;
