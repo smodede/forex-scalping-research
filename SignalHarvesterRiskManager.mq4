@@ -31,7 +31,8 @@ input double GroupEmergDDPercent = 28.0;         // Emergency - kill all provide
 input double MaxGroupLossAmount = 5000.0;        // $5,000 max loss per group (2.5% of $200K)
 input double MaxGroupLossPercent = 3.0;          // 3% max loss per group
 
-// Absolute Loss Protection - FTMO SAFETY (10% total account DD limit!)
+// Individual Provider Protection
+input bool   EnableIndividualProviderProtection = false; // Enable individual provider DD tracking
 input double MaxProviderLossAmount = 2500.0;     // $2,500 per provider (1.25% of $200K)
 input double MaxProviderLossPercent = 1.5;       // 1.5% max loss per provider (FTMO-appropriate)
 input bool   EnableAbsoluteLossProtection = true; // CRITICAL: Protects against bad signals
@@ -849,6 +850,9 @@ void CheckProviderFloatingDD()
 {
    // Check group-level DD first
    CheckGroupFloatingDD();
+   
+   // Skip individual provider checks if disabled
+   if(!EnableIndividualProviderProtection) return;
    
    // Then check individual providers
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
