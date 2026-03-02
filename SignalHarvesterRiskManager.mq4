@@ -933,10 +933,81 @@ void CheckProviderFloatingDD()
    // Check group-level DD first
    CheckGroupFloatingDD();
    
-   // Skip individual provider checks if disabled
+   // ═══════════════════════════════════════════════════════════════
+   // ABSOLUTE LOSS PROTECTION (Independent - always active if enabled)
+   // Protects against bad signals regardless of DD% tracking
+   // ═══════════════════════════════════════════════════════════════
+   if(EnableAbsoluteLossProtection)
+   {
+      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+      {
+         string pid = g_ProviderStats[i].providerId;
+         
+         if(g_ProviderStats[i].killSwitchTriggered) continue;
+         
+         double current = g_ProviderStats[i].currentEquity;
+         
+         if(current < 0)
+         {
+            bool triggerAbsoluteLoss = false;
+            string lossReason = "";
+            
+            // Check dollar-based limit
+            if(current <= -MaxProviderLossAmount)
+            {
+               triggerAbsoluteLoss = true;
+               lossReason = StringFormat("Lost $%.2f (limit: $%.2f)", -current, MaxProviderLossAmount);
+            }
+            
+            // Check percentage-based limit
+            double accountEquity = AccountEquity();
+            if(accountEquity > 0)
+            {
+               double lossPercent = (-current / accountEquity) * 100.0;
+               if(lossPercent >= MaxProviderLossPercent)
+               {
+                  triggerAbsoluteLoss = true;
+                  lossReason = StringFormat("Lost %.2f%% of account (limit: %.2f%%)", 
+                                           lossPercent, MaxProviderLossPercent);
+               }
+            }
+            
+            if(triggerAbsoluteLoss)
+            {
+               Print(StringFormat("🚨 ABSOLUTE LOSS LIMIT: Provider %s - %s - KILL SWITCH!", 
+                                 pid, lossReason));
+               
+               int closedCount = 0;
+               for(int j = ArraySize(g_OpenTrades) - 1; j >= 0; j--)
+               {
+                  if(g_OpenTrades[j].providerId == pid)
+                  {
+                     if(CloseOrder(g_OpenTrades[j].ticket, "Absolute loss limit breach"))
+                        closedCount++;
+                  }
+               }
+               
+               g_ProviderStats[i].killSwitchTriggered = true;
+               g_ProviderStats[i].killSwitchTime = TimeCurrent();
+               
+               AppendToAuditLog(pid, "ABSOLUTE_LOSS_KILLSWITCH", 0.0,
+                               StringFormat("%s - Closed %d trades", lossReason, closedCount));
+               
+               Alert(StringFormat("Provider %s: KILL SWITCH - %s!", pid, lossReason));
+               
+               // Update button colors immediately
+               UpdateButtonColors();
+               UpdateGroupButtonColors();
+            }
+         }
+      }
+   }
+   
+   // ═══════════════════════════════════════════════════════════════
+   // PEAK-BASED DD PROTECTION (Only if individual protection enabled)
+   // ═══════════════════════════════════════════════════════════════
    if(!EnableIndividualProviderProtection) return;
    
-   // Then check individual providers
    for(int i = 0; i < ArraySize(g_ProviderStats); i++)
    {
       string pid = g_ProviderStats[i].providerId;
@@ -946,67 +1017,6 @@ void CheckProviderFloatingDD()
       double peak = g_ProviderStats[i].peakEquity;
       double current = g_ProviderStats[i].currentEquity;
       
-      // ═══════════════════════════════════════════════════════════════
-      // ABSOLUTE LOSS PROTECTION (for providers that never profit)
-      // ═══════════════════════════════════════════════════════════════
-      if(EnableAbsoluteLossProtection && current < 0)
-      {
-         bool triggerAbsoluteLoss = false;
-         string lossReason = "";
-         
-         // Check dollar-based limit
-         if(current <= -MaxProviderLossAmount)
-         {
-            triggerAbsoluteLoss = true;
-            lossReason = StringFormat("Lost $%.2f (limit: $%.2f)", -current, MaxProviderLossAmount);
-         }
-         
-         // Check percentage-based limit
-         double accountEquity = AccountEquity();
-         if(accountEquity > 0)
-         {
-            double lossPercent = (-current / accountEquity) * 100.0;
-            if(lossPercent >= MaxProviderLossPercent)
-            {
-               triggerAbsoluteLoss = true;
-               lossReason = StringFormat("Lost %.2f%% of account (limit: %.2f%%)", 
-                                        lossPercent, MaxProviderLossPercent);
-            }
-         }
-         
-         if(triggerAbsoluteLoss)
-         {
-            Print(StringFormat("🚨 ABSOLUTE LOSS LIMIT: Provider %s - %s - KILL SWITCH!", 
-                              pid, lossReason));
-            
-            int closedCount = 0;
-            for(int j = ArraySize(g_OpenTrades) - 1; j >= 0; j--)
-            {
-               if(g_OpenTrades[j].providerId == pid)
-               {
-                  if(CloseOrder(g_OpenTrades[j].ticket, "Absolute loss limit breach"))
-                     closedCount++;
-               }
-            }
-            
-            g_ProviderStats[i].killSwitchTriggered = true;
-            g_ProviderStats[i].killSwitchTime = TimeCurrent();
-            
-            AppendToAuditLog(pid, "ABSOLUTE_LOSS_KILLSWITCH", 0.0,
-                            StringFormat("%s - Closed %d trades", lossReason, closedCount));
-            
-            Alert(StringFormat("Provider %s: KILL SWITCH - %s!", pid, lossReason));
-            
-            // Update button colors immediately
-            UpdateButtonColors();
-            UpdateGroupButtonColors();
-            continue;
-         }
-      }
-      
-      // ═══════════════════════════════════════════════════════════════
-      // PEAK-BASED DD PROTECTION (for providers with profit history)
-      // ═══════════════════════════════════════════════════════════════
       if(peak <= 0) continue;  // Skip peak DD if provider never profitable
       
       // Check minimum peak threshold before calculating DD
