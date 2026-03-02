@@ -42,7 +42,7 @@ input double MaxGroupLossPercent = 5.0;          // 5% max loss per group - KILL
 input bool   EnableIndividualProviderProtection = false; // Enable individual provider DD tracking
 input double MaxProviderLossAmount = 2500.0;     // $2,500 per provider (1.25% of $200K)
 input double MaxProviderLossPercent = 1.5;       // 1.5% max loss per provider (FTMO-appropriate)
-input bool   EnableAbsoluteLossProtection = true; // CRITICAL: Protects against bad signals
+input bool   EnableAbsoluteLossProtection = true; // CRITICAL: Absolute provider loss protection
 input int    StateSaveIntervalSeconds = 300;
 input int    RecalcClosedPLIntervalSec = 600;
 input bool   EnableDebugLogs = false;
@@ -934,7 +934,7 @@ void CheckProviderFloatingDD()
    CheckGroupFloatingDD();
    
    // ═══════════════════════════════════════════════════════════════
-   // ABSOLUTE LOSS PROTECTION (Independent - always active if enabled)
+   // ABSOLUTE PROVIDER LOSS PROTECTION (Independent - always active if enabled)
    // Protects against bad signals regardless of DD% tracking
    // ═══════════════════════════════════════════════════════════════
    if(EnableAbsoluteLossProtection)
@@ -974,7 +974,7 @@ void CheckProviderFloatingDD()
             
             if(triggerAbsoluteLoss)
             {
-               Print(StringFormat("🚨 ABSOLUTE LOSS LIMIT: Provider %s - %s - KILL SWITCH!", 
+               Print(StringFormat("🚨 ABSOLUTE PROVIDER LOSS LIMIT: Provider %s - %s - KILL SWITCH!", 
                                  pid, lossReason));
                
                int closedCount = 0;
@@ -982,7 +982,7 @@ void CheckProviderFloatingDD()
                {
                   if(g_OpenTrades[j].providerId == pid)
                   {
-                     if(CloseOrder(g_OpenTrades[j].ticket, "Absolute loss limit breach"))
+                     if(CloseOrder(g_OpenTrades[j].ticket, "Absolute provider loss limit breach"))
                         closedCount++;
                   }
                }
@@ -990,7 +990,7 @@ void CheckProviderFloatingDD()
                g_ProviderStats[i].killSwitchTriggered = true;
                g_ProviderStats[i].killSwitchTime = TimeCurrent();
                
-               AppendToAuditLog(pid, "ABSOLUTE_LOSS_KILLSWITCH", 0.0,
+               AppendToAuditLog(pid, "ABSOLUTE_PROVIDER_LOSS_KILLSWITCH", 0.0,
                                StringFormat("%s - Closed %d trades", lossReason, closedCount));
                
                Alert(StringFormat("Provider %s: KILL SWITCH - %s!", pid, lossReason));
