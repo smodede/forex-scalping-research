@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,1000.0;sig_284214,12.0,18.0,22.0,1000.0;sig_284720,12.0,18.0,22.0,1000.0;sig_286254,12.0,18.0,22.0,1000.0;sig_286289,12.0,18.0,22.0,1000.0;sig_276594,12.0,18.0,22.0,1000.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,3000.0;sig_284214,12.0,18.0,22.0,1000.0;sig_284720,12.0,18.0,22.0,1000.0;sig_286254,12.0,18.0,22.0,1000.0;sig_286289,12.0,18.0,22.0,1000.0;sig_276594,12.0,18.0,22.0,1000.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -28,8 +28,15 @@ input bool   EnableGroupLevelProtection = true;  // Enable group DD tracking (e.
 input double GroupWarnDDPercent = 15.0;          // Warning threshold for combined group DD
 input double GroupCritDDPercent = 22.0;          // Critical threshold - trim worst providers
 input double GroupEmergDDPercent = 28.0;         // Emergency - kill all providers in group
-input double MaxGroupLossAmount = 5000.0;        // $5,000 max loss per group (2.5% of $200K)
-input double MaxGroupLossPercent = 3.0;          // 3% max loss per group
+
+// Progressive Loss Protection (Floating P/L based)
+input double GroupWarningFloatingLoss = 2500.0;  // Warning at -$2,500 floating loss
+input double GroupTrimFloatingLoss = 5000.0;     // Trim worst trade at -$5,000 floating loss
+input int    GroupTrimCooldownSeconds = 30;      // Cooldown between trims (seconds)
+
+// Kill Switch Protection (Closed P/L based - realized losses)
+input double GroupKillSwitchClosedLoss = 8000.0; // Kill switch at -$8,000 closed (realized) loss
+input double MaxGroupLossPercent = 5.0;          // 5% max loss per group - KILL SWITCH
 
 // Individual Provider Protection
 input bool   EnableIndividualProviderProtection = false; // Enable individual provider DD tracking
@@ -86,6 +93,7 @@ struct GroupStats
    bool     killSwitchTriggered;
    datetime killSwitchTime;       // When kill switch was triggered
    datetime lastWarnTime;
+   datetime lastTrimTime;         // When last trim occurred
 };
 
 struct TradeInfo
@@ -176,6 +184,7 @@ int EnsureGroupExists(string groupId)
    g_GroupStats[size].killSwitchTriggered = false;
    g_GroupStats[size].killSwitchTime = 0;
    g_GroupStats[size].lastWarnTime = 0;
+   g_GroupStats[size].lastTrimTime = 0;
    
    DebugLog(StringFormat("Created group tracker: %s", groupId));
    return size;
@@ -713,41 +722,62 @@ void CheckGroupFloatingDD()
       
       double peak = g_GroupStats[i].peakEquity;
       double current = g_GroupStats[i].currentEquity;
+      double closedPL = g_GroupStats[i].closedPL;
+      double floatingPL = g_GroupStats[i].floatingPL;
+      datetime currentTime = TimeCurrent();
       
       // ═══════════════════════════════════════════════════════════════
-      // GROUP ABSOLUTE LOSS PROTECTION
+      // PROGRESSIVE GROUP LOSS PROTECTION
       // ═══════════════════════════════════════════════════════════════
-      if(current < 0)
+      
+      // ──────────────────────────────────────────────────────────────
+      // LEVEL 1: KILL SWITCH (Based on Closed P/L - Realized Losses)
+      // ──────────────────────────────────────────────────────────────
+      if(closedPL < 0 && closedPL <= -GroupKillSwitchClosedLoss)
       {
-         bool triggerAbsoluteLoss = false;
-         string lossReason = "";
+         Print(StringFormat("🚨 GROUP KILL SWITCH: Group %s closed loss $%.2f (limit: $%.2f) - KILL ALL!",
+                           groupId, closedPL, -GroupKillSwitchClosedLoss));
          
-         if(current <= -MaxGroupLossAmount)
-         {
-            triggerAbsoluteLoss = true;
-            lossReason = StringFormat("Lost $%.2f (limit: $%.2f)", -current, MaxGroupLossAmount);
-         }
+         int closedCount = CloseAllGroupTrades(groupId, "Group kill switch - realized loss");
+         g_GroupStats[i].killSwitchTriggered = true;
+         g_GroupStats[i].killSwitchTime = currentTime;
          
-         double accountEquity = AccountEquity();
-         if(accountEquity > 0)
+         // Trigger kill switch for all providers in group
+         for(int j = 0; j < ArraySize(g_ProviderStats); j++)
          {
-            double lossPercent = (-current / accountEquity) * 100.0;
-            if(lossPercent >= MaxGroupLossPercent)
+            if(g_ProviderStats[j].groupId == groupId)
             {
-               triggerAbsoluteLoss = true;
-               lossReason = StringFormat("Lost %.2f%% of account (limit: %.2f%%)",
-                                        lossPercent, MaxGroupLossPercent);
+               g_ProviderStats[j].killSwitchTriggered = true;
+               g_ProviderStats[j].killSwitchTime = currentTime;
             }
          }
          
-         if(triggerAbsoluteLoss)
+         AppendToAuditLog("GROUP_" + groupId, "GROUP_KILL_SWITCH", 0.0,
+                         StringFormat("Closed P/L: $%.2f (limit: $%.2f) - Closed %d trades",
+                                     closedPL, -GroupKillSwitchClosedLoss, closedCount));
+         
+         Alert(StringFormat("Group %s: KILL SWITCH - Realized loss $%.2f!", groupId, closedPL));
+         
+         UpdateButtonColors();
+         UpdateGroupButtonColors();
+         continue;
+      }
+      
+      // ──────────────────────────────────────────────────────────────
+      // Additional Kill Switch: Account % Protection
+      // ──────────────────────────────────────────────────────────────
+      double accountEquity = AccountEquity();
+      if(accountEquity > 0 && current < 0)
+      {
+         double lossPercent = (-current / accountEquity) * 100.0;
+         if(lossPercent >= MaxGroupLossPercent)
          {
-            Print(StringFormat("🚨 GROUP ABSOLUTE LOSS: Group %s - %s - KILL ALL!",
-                              groupId, lossReason));
+            Print(StringFormat("🚨 GROUP KILL SWITCH: Group %s lost %.2f%% of account (limit: %.2f%%) - KILL ALL!",
+                              groupId, lossPercent, MaxGroupLossPercent));
             
-            int closedCount = CloseAllGroupTrades(groupId, "Group absolute loss");
+            int closedCount = CloseAllGroupTrades(groupId, "Group kill switch - account % limit");
             g_GroupStats[i].killSwitchTriggered = true;
-            g_GroupStats[i].killSwitchTime = TimeCurrent();
+            g_GroupStats[i].killSwitchTime = currentTime;
             
             // Trigger kill switch for all providers in group
             for(int j = 0; j < ArraySize(g_ProviderStats); j++)
@@ -755,19 +785,71 @@ void CheckGroupFloatingDD()
                if(g_ProviderStats[j].groupId == groupId)
                {
                   g_ProviderStats[j].killSwitchTriggered = true;
-                  g_ProviderStats[j].killSwitchTime = TimeCurrent();
+                  g_ProviderStats[j].killSwitchTime = currentTime;
                }
             }
             
-            AppendToAuditLog("GROUP_" + groupId, "GROUP_ABSOLUTE_LOSS", 0.0,
-                            StringFormat("%s - Closed %d trades", lossReason, closedCount));
+            AppendToAuditLog("GROUP_" + groupId, "GROUP_KILL_SWITCH", 0.0,
+                            StringFormat("Lost %.2f%% of account - Closed %d trades", lossPercent, closedCount));
             
-            Alert(StringFormat("Group %s: KILL SWITCH - %s!", groupId, lossReason));
+            Alert(StringFormat("Group %s: KILL SWITCH - Lost %.2f%% of account!", groupId, lossPercent));
             
-            // Update button colors immediately
             UpdateButtonColors();
             UpdateGroupButtonColors();
             continue;
+         }
+      }
+      
+      // ──────────────────────────────────────────────────────────────
+      // LEVEL 2: TRIM (Based on Floating P/L - Unrealized Losses)
+      // ──────────────────────────────────────────────────────────────
+      if(floatingPL < 0 && floatingPL <= -GroupTrimFloatingLoss)
+      {
+         // Check cooldown to prevent excessive trimming
+         if(currentTime - g_GroupStats[i].lastTrimTime >= GroupTrimCooldownSeconds)
+         {
+            Print(StringFormat("⚠️ GROUP TRIM: Group %s floating loss $%.2f (trim level: $%.2f) - Closing worst trade",
+                              groupId, floatingPL, -GroupTrimFloatingLoss));
+            
+            int closedCount = CloseWorstGroupTrade(groupId);
+            
+            if(closedCount > 0)
+            {
+               g_GroupStats[i].lastTrimTime = currentTime;  // Update trim time
+               
+               AppendToAuditLog("GROUP_" + groupId, "GROUP_TRIM", 0.0,
+                               StringFormat("Floating loss: $%.2f, closed worst trade", floatingPL));
+               
+               DebugLog(StringFormat("✓ Trimmed worst trade, cooldown: %d seconds", GroupTrimCooldownSeconds));
+            }
+            else
+            {
+               DebugLog(StringFormat("Group %s: No trades available to trim", groupId));
+            }
+         }
+         else
+         {
+            int timeRemaining = GroupTrimCooldownSeconds - (int)(currentTime - g_GroupStats[i].lastTrimTime);
+            DebugLog(StringFormat("Group %s: Trim cooldown active (%d seconds remaining)",
+                                 groupId, timeRemaining));
+         }
+      }
+      
+      // ──────────────────────────────────────────────────────────────
+      // LEVEL 3: WARNING (Based on Floating P/L - Unrealized Losses)
+      // ──────────────────────────────────────────────────────────────
+      if(floatingPL < 0 && floatingPL <= -GroupWarningFloatingLoss)
+      {
+         if(currentTime - g_GroupStats[i].lastWarnTime >= 300)  // Warn every 5 minutes
+         {
+            Print(StringFormat("⚠️ GROUP WARNING: Group %s floating loss $%.2f (warning level: $%.2f)",
+                              groupId, floatingPL, -GroupWarningFloatingLoss));
+            
+            AppendToAuditLog("GROUP_" + groupId, "GROUP_WARNING", 0.0,
+                            StringFormat("Floating loss: $%.2f, Closed P/L: $%.2f",
+                                        floatingPL, closedPL));
+            
+            g_GroupStats[i].lastWarnTime = currentTime;
          }
       }
       
@@ -1017,6 +1099,52 @@ int CloseAllGroupTrades(string groupId, string reason)
    }
    
    return closedCount;
+}
+
+//+------------------------------------------------------------------+
+//| Close Worst Single Trade in Group                                |
+//+------------------------------------------------------------------+
+int CloseWorstGroupTrade(string groupId)
+{
+   int worstTradeIdx = -1;
+   double worstPL = 999999.0;  // Start with large positive number
+   
+   // Find the single worst performing trade across all providers in group
+   for(int i = 0; i < ArraySize(g_OpenTrades); i++)
+   {
+      string pid = g_OpenTrades[i].providerId;
+      int pIdx = FindProviderStatsIndex(pid);
+      
+      if(pIdx >= 0 && g_ProviderStats[pIdx].groupId == groupId)
+      {
+         if(g_OpenTrades[i].floatingPL < worstPL)
+         {
+            worstPL = g_OpenTrades[i].floatingPL;
+            worstTradeIdx = i;
+         }
+      }
+   }
+   
+   if(worstTradeIdx < 0)
+   {
+      DebugLog(StringFormat("No trades found for group %s", groupId));
+      return 0;
+   }
+   
+   int ticket = g_OpenTrades[worstTradeIdx].ticket;
+   string pid = g_OpenTrades[worstTradeIdx].providerId;
+   
+   Print(StringFormat("💰 Trimming worst trade: Ticket #%d from Provider %s (P/L: $%.2f)",
+                     ticket, pid, worstPL));
+   
+   if(CloseOrder(ticket, "Group trim - worst trade"))
+   {
+      DebugLog(StringFormat("✓ Closed worst trade #%d (P/L: $%.2f) from group %s", 
+                           ticket, worstPL, groupId));
+      return 1;
+   }
+   
+   return 0;
 }
 
 //+------------------------------------------------------------------+
