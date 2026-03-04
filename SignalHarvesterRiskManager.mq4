@@ -40,7 +40,7 @@ input double MaxGroupLossPercent = 5.0;          // 5% max loss per group - KILL
 // Account-Wide Protection (monitors ALL groups combined)
 input bool   EnableAccountWideProtection = true;  // Enable account-wide protection
 input double AccountTrimFloatingLoss = 5000.0;    // Trim worst provider at -$5,000 total floating loss
-input double AccountKillClosedLoss = 6500.0;      // KILL ALL at -$6,000 total equity loss (floating + closed)
+input double AccountKillClosedLoss = 9000.0;      // KILL ALL at -$9,000 DAILY loss (floating + closed today) - RESETS DAILY
 input int    AccountTrimCooldownSeconds = 30;     // Cooldown between account-wide trims
 
 // Individual Provider Protection
@@ -127,6 +127,11 @@ datetime      g_LastStatusLog = 0;
 datetime      g_LastAccountTrimTime = 0;
 string        g_AuditFileName;
 bool          g_AccountKillSwitchTriggered = false;
+
+// Daily Account-Wide Protection Tracking
+datetime      g_CurrentTradingDay = 0;         // Current trading day (date only, no time)
+double        g_DailyStartClosedPL = 0.0;       // Closed P/L at start of trading day
+double        g_DailyClosedPL = 0.0;             // Closed P/L for today only
 
 //+------------------------------------------------------------------+
 //| Helper: Debug Log                                                |
@@ -715,31 +720,92 @@ void AutoResetKillSwitches()
 }
 
 //+------------------------------------------------------------------+
+//| Check and Reset Daily Account Tracking                           |
+//+------------------------------------------------------------------+
+void CheckDailyReset()
+{
+   datetime currentTime = TimeCurrent();
+   datetime currentDay = StringToTime(TimeToString(currentTime, TIME_DATE)); // Strip time, keep date only
+   
+   // Initialize on first run
+   if(g_CurrentTradingDay == 0)
+   {
+      g_CurrentTradingDay = currentDay;
+      g_DailyStartClosedPL = GetTotalAccountClosedPL();
+      g_DailyClosedPL = 0.0;
+      
+      Print(StringFormat("📅 Daily tracking initialized: %s | Starting Closed P/L: $%.2f",
+                        TimeToString(currentDay, TIME_DATE), g_DailyStartClosedPL));
+      
+      AppendToAuditLog("ACCOUNT_WIDE", "DAILY_INIT", 0.0,
+                      StringFormat("Date: %s, Starting Closed P/L: $%.2f",
+                                  TimeToString(currentDay, TIME_DATE), g_DailyStartClosedPL));
+      return;
+   }
+   
+   // Check if it's a new trading day
+   if(currentDay > g_CurrentTradingDay)
+   {
+      // New trading day - reset daily tracking
+      datetime oldDay = g_CurrentTradingDay;
+      double oldDailyPL = g_DailyClosedPL;
+      
+      g_CurrentTradingDay = currentDay;
+      g_DailyStartClosedPL = GetTotalAccountClosedPL();
+      g_DailyClosedPL = 0.0;
+      
+      // Reset account kill switch for new day
+      if(g_AccountKillSwitchTriggered)
+      {
+         g_AccountKillSwitchTriggered = false;
+         Print("✓ Account kill switch RESET for new trading day");
+      }
+      
+      Print(StringFormat("📅 NEW TRADING DAY RESET: %s → %s",
+                        TimeToString(oldDay, TIME_DATE), TimeToString(currentDay, TIME_DATE)));
+      Print(StringFormat("   Previous day P/L: $%.2f | New starting Closed P/L: $%.2f",
+                        oldDailyPL, g_DailyStartClosedPL));
+      
+      AppendToAuditLog("ACCOUNT_WIDE", "DAILY_RESET", 0.0,
+                      StringFormat("New day: %s, Previous day P/L: $%.2f, New starting Closed P/L: $%.2f",
+                                  TimeToString(currentDay, TIME_DATE), oldDailyPL, g_DailyStartClosedPL));
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check Account-Wide Protection (All Groups Combined)              |
 //+------------------------------------------------------------------+
 void CheckAccountWideProtection()
 {
    if(!EnableAccountWideProtection) return;
    
-   // Get total account floating and closed P/L across ALL groups
+   // Check for daily reset first
+   CheckDailyReset();
+   
+   // Get total account floating P/L across ALL groups
    double totalFloatingPL = GetTotalAccountFloatingPL();
+   
+   // Calculate daily closed P/L (closed today only)
    double totalClosedPL = GetTotalAccountClosedPL();
+   g_DailyClosedPL = totalClosedPL - g_DailyStartClosedPL;
+   
    datetime currentTime = TimeCurrent();
    
    // Skip if account kill switch already triggered
    if(g_AccountKillSwitchTriggered) return;
    
    // ═══════════════════════════════════════════════════════════════
-   // LEVEL 1: ACCOUNT KILL SWITCH (Total Equity = Floating + Closed)
+   // LEVEL 1: ACCOUNT KILL SWITCH (Daily Total = Floating + Daily Closed)
    // ═══════════════════════════════════════════════════════════════
-   double totalEquity = totalFloatingPL + totalClosedPL;
+   double dailyTotalPL = totalFloatingPL + g_DailyClosedPL;
    
-   if(totalEquity <= -AccountKillClosedLoss)
+   if(dailyTotalPL <= -AccountKillClosedLoss)
    {
-      Print(StringFormat("🚨🚨🚨 ACCOUNT KILL SWITCH: Total equity loss $%.2f (limit: $%.2f) - CLOSING ALL TRADES!",
-                        totalEquity, -AccountKillClosedLoss));
-      Print(StringFormat("    Breakdown: Floating $%.2f + Closed $%.2f = Total $%.2f",
-                        totalFloatingPL, totalClosedPL, totalEquity));
+      Print(StringFormat("🚨🚨🚨 ACCOUNT KILL SWITCH: Daily total loss $%.2f (limit: $%.2f) - CLOSING ALL TRADES!",
+                        dailyTotalPL, -AccountKillClosedLoss));
+      Print(StringFormat("    Breakdown: Floating $%.2f + Daily Closed $%.2f = Daily Total $%.2f",
+                        totalFloatingPL, g_DailyClosedPL, dailyTotalPL));
+      Print(StringFormat("    Trading Day: %s", TimeToString(g_CurrentTradingDay, TIME_DATE)));
       
       int closedCount = CloseAllTrades("Account kill switch - total equity loss limit");
       g_AccountKillSwitchTriggered = true;
@@ -758,10 +824,10 @@ void CheckAccountWideProtection()
       }
       
       AppendToAuditLog("ACCOUNT_WIDE", "ACCOUNT_KILL_SWITCH", 0.0,
-                      StringFormat("Total equity: $%.2f (Floating: $%.2f + Closed: $%.2f) - Limit: $%.2f - Closed %d trades",
-                                  totalEquity, totalFloatingPL, totalClosedPL, -AccountKillClosedLoss, closedCount));
+                      StringFormat("Daily total: $%.2f (Floating: $%.2f + Daily Closed: $%.2f) - Limit: $%.2f - Closed %d trades - Date: %s",
+                                  dailyTotalPL, totalFloatingPL, g_DailyClosedPL, -AccountKillClosedLoss, closedCount, TimeToString(g_CurrentTradingDay, TIME_DATE)));
       
-      Alert(StringFormat("ACCOUNT KILL SWITCH: Total equity loss $%.2f - ALL TRADES CLOSED!", totalEquity));
+      Alert(StringFormat("ACCOUNT KILL SWITCH: Daily total loss $%.2f - ALL TRADES CLOSED!", dailyTotalPL));
       
       UpdateButtonColors();
       UpdateGroupButtonColors();
@@ -2081,6 +2147,11 @@ int OnInit()
    g_LastClosedPLUpdate = TimeCurrent();
    g_LastButtonUpdate = TimeCurrent();
    g_LastStatusLog = TimeCurrent();
+   
+   // Initialize daily tracking
+   g_CurrentTradingDay = 0;         // Will be set on first CheckDailyReset() call
+   g_DailyStartClosedPL = 0.0;
+   g_DailyClosedPL = 0.0;
    
    CreateChartButtons();
    UpdateButtonColors();
