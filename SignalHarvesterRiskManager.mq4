@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,3000.0;sig_284214,12.0,18.0,22.0,1000.0;sig_284720,12.0,18.0,22.0,1000.0;sig_286254,12.0,18.0,22.0,1000.0;sig_286289,12.0,18.0,22.0,1000.0;sig_276594,12.0,18.0,22.0,1000.0";
+input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,30000.0;sig_284214,12.0,18.0,22.0,10000.0;sig_284720,12.0,18.0,22.0,10000.0;sig_286254,12.0,18.0,22.0,10000.0;sig_286289,12.0,18.0,22.0,10000.0;sig_276594,12.0,18.0,22.0,10000.0";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -30,13 +30,18 @@ input double GroupCritDDPercent = 22.0;          // Critical threshold - trim wo
 input double GroupEmergDDPercent = 28.0;         // Emergency - kill all providers in group
 
 // Progressive Loss Protection (Floating P/L based)
-input double GroupWarningFloatingLoss = 2500.0;  // Warning at -$2,500 floating loss
-input double GroupTrimFloatingLoss = 5000.0;     // Trim worst trade at -$5,000 floating loss
+input double GroupWarningFloatingLoss = 1200.0;  // Warning at -$2,500 floating loss
+input double GroupTrimFloatingLoss = 2500.0;     // Trim worst trade at -$5,000 floating loss
 input int    GroupTrimCooldownSeconds = 30;      // Cooldown between trims (seconds)
 
-// Kill Switch Protection (Closed P/L based - realized losses)
-input double GroupKillSwitchClosedLoss = 8000.0; // Kill switch at -$8,000 closed (realized) loss
+// Kill Switch Protection
 input double MaxGroupLossPercent = 5.0;          // 5% max loss per group - KILL SWITCH
+
+// Account-Wide Protection (monitors ALL groups combined)
+input bool   EnableAccountWideProtection = true;  // Enable account-wide protection
+input double AccountTrimFloatingLoss = 5000.0;    // Trim worst provider at -$5,000 total floating loss
+input double AccountKillClosedLoss = 6500.0;      // KILL ALL at -$6,000 total equity loss (floating + closed)
+input int    AccountTrimCooldownSeconds = 30;     // Cooldown between account-wide trims
 
 // Individual Provider Protection
 input bool   EnableIndividualProviderProtection = false; // Enable individual provider DD tracking
@@ -119,7 +124,9 @@ datetime      g_LastStateSave = 0;
 datetime      g_LastClosedPLUpdate = 0;
 datetime      g_LastButtonUpdate = 0;
 datetime      g_LastStatusLog = 0;
+datetime      g_LastAccountTrimTime = 0;
 string        g_AuditFileName;
+bool          g_AccountKillSwitchTriggered = false;
 
 //+------------------------------------------------------------------+
 //| Helper: Debug Log                                                |
@@ -708,6 +715,96 @@ void AutoResetKillSwitches()
 }
 
 //+------------------------------------------------------------------+
+//| Check Account-Wide Protection (All Groups Combined)              |
+//+------------------------------------------------------------------+
+void CheckAccountWideProtection()
+{
+   if(!EnableAccountWideProtection) return;
+   
+   // Get total account floating and closed P/L across ALL groups
+   double totalFloatingPL = GetTotalAccountFloatingPL();
+   double totalClosedPL = GetTotalAccountClosedPL();
+   datetime currentTime = TimeCurrent();
+   
+   // Skip if account kill switch already triggered
+   if(g_AccountKillSwitchTriggered) return;
+   
+   // ═══════════════════════════════════════════════════════════════
+   // LEVEL 1: ACCOUNT KILL SWITCH (Total Equity = Floating + Closed)
+   // ═══════════════════════════════════════════════════════════════
+   double totalEquity = totalFloatingPL + totalClosedPL;
+   
+   if(totalEquity <= -AccountKillClosedLoss)
+   {
+      Print(StringFormat("🚨🚨🚨 ACCOUNT KILL SWITCH: Total equity loss $%.2f (limit: $%.2f) - CLOSING ALL TRADES!",
+                        totalEquity, -AccountKillClosedLoss));
+      Print(StringFormat("    Breakdown: Floating $%.2f + Closed $%.2f = Total $%.2f",
+                        totalFloatingPL, totalClosedPL, totalEquity));
+      
+      int closedCount = CloseAllTrades("Account kill switch - total equity loss limit");
+      g_AccountKillSwitchTriggered = true;
+      
+      // Trigger kill switch for all groups and providers
+      for(int i = 0; i < ArraySize(g_GroupStats); i++)
+      {
+         g_GroupStats[i].killSwitchTriggered = true;
+         g_GroupStats[i].killSwitchTime = currentTime;
+      }
+      
+      for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+      {
+         g_ProviderStats[i].killSwitchTriggered = true;
+         g_ProviderStats[i].killSwitchTime = currentTime;
+      }
+      
+      AppendToAuditLog("ACCOUNT_WIDE", "ACCOUNT_KILL_SWITCH", 0.0,
+                      StringFormat("Total equity: $%.2f (Floating: $%.2f + Closed: $%.2f) - Limit: $%.2f - Closed %d trades",
+                                  totalEquity, totalFloatingPL, totalClosedPL, -AccountKillClosedLoss, closedCount));
+      
+      Alert(StringFormat("ACCOUNT KILL SWITCH: Total equity loss $%.2f - ALL TRADES CLOSED!", totalEquity));
+      
+      UpdateButtonColors();
+      UpdateGroupButtonColors();
+      return;
+   }
+   
+   // ═══════════════════════════════════════════════════════════════
+   // LEVEL 2: TRIM WORST PROVIDER (Floating P/L - Unrealized Losses)
+   // ═══════════════════════════════════════════════════════════════
+   if(totalFloatingPL < 0 && totalFloatingPL <= -AccountTrimFloatingLoss)
+   {
+      // Check cooldown to prevent excessive trimming
+      if(currentTime - g_LastAccountTrimTime >= AccountTrimCooldownSeconds)
+      {
+         Print(StringFormat("⚠️ ACCOUNT TRIM: Total floating loss $%.2f (trim level: $%.2f) - Closing worst provider",
+                           totalFloatingPL, -AccountTrimFloatingLoss));
+         
+         int closedCount = CloseWorstProviderAccountWide();
+         
+         if(closedCount > 0)
+         {
+            g_LastAccountTrimTime = currentTime;
+            
+            AppendToAuditLog("ACCOUNT_WIDE", "ACCOUNT_TRIM", 0.0,
+                            StringFormat("Floating loss: $%.2f, closed worst provider (%d trades)",
+                                        totalFloatingPL, closedCount));
+            
+            DebugLog(StringFormat("✓ Trimmed worst provider, cooldown: %d seconds", AccountTrimCooldownSeconds));
+         }
+         else
+         {
+            DebugLog("Account trim: No trades available to close");
+         }
+      }
+      else
+      {
+         int timeRemaining = AccountTrimCooldownSeconds - (int)(currentTime - g_LastAccountTrimTime);
+         DebugLog(StringFormat("Account trim cooldown active (%d seconds remaining)", timeRemaining));
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check Group Floating DD                                          |
 //+------------------------------------------------------------------+
 void CheckGroupFloatingDD()
@@ -731,40 +828,7 @@ void CheckGroupFloatingDD()
       // ═══════════════════════════════════════════════════════════════
       
       // ──────────────────────────────────────────────────────────────
-      // LEVEL 1: KILL SWITCH (Based on Closed P/L - Realized Losses)
-      // ──────────────────────────────────────────────────────────────
-      if(closedPL < 0 && closedPL <= -GroupKillSwitchClosedLoss)
-      {
-         Print(StringFormat("🚨 GROUP KILL SWITCH: Group %s closed loss $%.2f (limit: $%.2f) - KILL ALL!",
-                           groupId, closedPL, -GroupKillSwitchClosedLoss));
-         
-         int closedCount = CloseAllGroupTrades(groupId, "Group kill switch - realized loss");
-         g_GroupStats[i].killSwitchTriggered = true;
-         g_GroupStats[i].killSwitchTime = currentTime;
-         
-         // Trigger kill switch for all providers in group
-         for(int j = 0; j < ArraySize(g_ProviderStats); j++)
-         {
-            if(g_ProviderStats[j].groupId == groupId)
-            {
-               g_ProviderStats[j].killSwitchTriggered = true;
-               g_ProviderStats[j].killSwitchTime = currentTime;
-            }
-         }
-         
-         AppendToAuditLog("GROUP_" + groupId, "GROUP_KILL_SWITCH", 0.0,
-                         StringFormat("Closed P/L: $%.2f (limit: $%.2f) - Closed %d trades",
-                                     closedPL, -GroupKillSwitchClosedLoss, closedCount));
-         
-         Alert(StringFormat("Group %s: KILL SWITCH - Realized loss $%.2f!", groupId, closedPL));
-         
-         UpdateButtonColors();
-         UpdateGroupButtonColors();
-         continue;
-      }
-      
-      // ──────────────────────────────────────────────────────────────
-      // Additional Kill Switch: Account % Protection
+      // LEVEL 1: KILL SWITCH (Account % Protection)
       // ──────────────────────────────────────────────────────────────
       double accountEquity = AccountEquity();
       if(accountEquity > 0 && current < 0)
@@ -930,7 +994,10 @@ void CheckGroupFloatingDD()
 //+------------------------------------------------------------------+
 void CheckProviderFloatingDD()
 {
-   // Check group-level DD first
+   // Check account-wide protection first (highest priority)
+   CheckAccountWideProtection();
+   
+   // Check group-level DD
    CheckGroupFloatingDD();
    
    // ═══════════════════════════════════════════════════════════════
@@ -1087,6 +1154,100 @@ void CheckProviderFloatingDD()
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| Get Total Account Floating P/L (All Groups)                      |
+//+------------------------------------------------------------------+
+double GetTotalAccountFloatingPL()
+{
+   double totalFloating = 0.0;
+   
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      totalFloating += g_GroupStats[i].floatingPL;
+   }
+   
+   return totalFloating;
+}
+
+//+------------------------------------------------------------------+
+//| Get Total Account Closed P/L (All Groups)                        |
+//+------------------------------------------------------------------+
+double GetTotalAccountClosedPL()
+{
+   double totalClosed = 0.0;
+   
+   for(int i = 0; i < ArraySize(g_GroupStats); i++)
+   {
+      totalClosed += g_GroupStats[i].closedPL;
+   }
+   
+   return totalClosed;
+}
+
+//+------------------------------------------------------------------+
+//| Close All Trades (Account-Wide)                                  |
+//+------------------------------------------------------------------+
+int CloseAllTrades(string reason)
+{
+   int closedCount = 0;
+   
+   Print(StringFormat("🚨 CLOSING ALL ACCOUNT TRADES: %s", reason));
+   
+   for(int i = ArraySize(g_OpenTrades) - 1; i >= 0; i--)
+   {
+      if(CloseOrder(g_OpenTrades[i].ticket, reason))
+         closedCount++;
+   }
+   
+   Print(StringFormat("✓ Closed %d trades account-wide", closedCount));
+   
+   return closedCount;
+}
+
+//+------------------------------------------------------------------+
+//| Close Worst Provider Account-Wide                                |
+//+------------------------------------------------------------------+
+int CloseWorstProviderAccountWide()
+{
+   // Find provider with worst floating P/L across entire account
+   string worstProviderId = "";
+   double worstFloatingPL = 999999.0;  // Start with large positive
+   
+   for(int i = 0; i < ArraySize(g_ProviderStats); i++)
+   {
+      if(g_ProviderStats[i].floatingPL < worstFloatingPL && g_ProviderStats[i].tradesCount > 0)
+      {
+         worstFloatingPL = g_ProviderStats[i].floatingPL;
+         worstProviderId = g_ProviderStats[i].providerId;
+      }
+   }
+   
+   if(worstProviderId == "")
+   {
+      DebugLog("No provider found with open trades to close");
+      return 0;
+   }
+   
+   Print(StringFormat("💰 Closing ALL trades from worst provider: %s (Floating P/L: $%.2f)",
+                     worstProviderId, worstFloatingPL));
+   
+   // Close all trades from this provider
+   int closedCount = 0;
+   
+   for(int i = ArraySize(g_OpenTrades) - 1; i >= 0; i--)
+   {
+      if(g_OpenTrades[i].providerId == worstProviderId)
+      {
+         if(CloseOrder(g_OpenTrades[i].ticket, "Account-wide trim - worst provider"))
+            closedCount++;
+      }
+   }
+   
+   Print(StringFormat("✓ Closed %d trades from provider %s", closedCount, worstProviderId));
+   
+   return closedCount;
 }
 
 //+------------------------------------------------------------------+
