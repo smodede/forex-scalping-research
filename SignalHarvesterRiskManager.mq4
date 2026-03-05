@@ -614,6 +614,36 @@ void LogProviderStatus()
 }
 
 //+------------------------------------------------------------------+
+//| Log Account-Wide Status (Diagnostic)                             |
+//+------------------------------------------------------------------+
+void LogAccountWideStatus()
+{
+   double totalFloatingPL = GetTotalAccountFloatingPL();
+   double totalClosedPL = GetTotalAccountClosedPL();
+   double dailyTotalPL = totalFloatingPL + g_DailyClosedPL;
+   double distanceToKillSwitch = -AccountKillClosedLoss - dailyTotalPL;
+   double percentToKillSwitch = (dailyTotalPL / -AccountKillClosedLoss) * 100.0;
+   
+   Print("\n========== ACCOUNT-WIDE STATUS ==========");
+   Print(StringFormat("Trading Day: %s", TimeToString(g_CurrentTradingDay, TIME_DATE)));
+   Print(StringFormat("Daily Closed P/L: $%.2f (since day start: $%.2f)",
+                     g_DailyClosedPL, g_DailyStartClosedPL));
+   Print(StringFormat("Floating P/L: $%.2f", totalFloatingPL));
+   Print(StringFormat("Daily Total P/L: $%.2f (Closed + Floating)", dailyTotalPL));
+   Print(StringFormat("Kill Switch: $%.2f limit | Distance: $%.2f (%.1f%% utilized)",
+                     -AccountKillClosedLoss, distanceToKillSwitch, percentToKillSwitch));
+   Print(StringFormat("Account Kill Switch: %s",
+                     g_AccountKillSwitchTriggered ? "TRIGGERED" : "Active"));
+   Print("========================================\n");
+   
+   // Log to audit file
+   AppendToAuditLog("ACCOUNT_WIDE", "ACCOUNT_STATUS", 0.0,
+                   StringFormat("Daily Closed: $%.2f, Floating: $%.2f, Daily Total: $%.2f, Distance to Kill: $%.2f, Date: %s",
+                               g_DailyClosedPL, totalFloatingPL, dailyTotalPL, distanceToKillSwitch,
+                               TimeToString(g_CurrentTradingDay, TIME_DATE)));
+}
+
+//+------------------------------------------------------------------+
 //| Append to CSV Audit Log                                          |
 //+------------------------------------------------------------------+
 void AppendToAuditLog(string providerId, string eventType, double ddPercent, string details)
@@ -2222,6 +2252,7 @@ void OnTick()
    // Log provider status every 5 minutes for diagnostics
    if(TimeCurrent() - g_LastStatusLog >= 300)
    {
+      LogAccountWideStatus();  // Log account-wide status first
       LogProviderStatus();
       g_LastStatusLog = TimeCurrent();
    }
