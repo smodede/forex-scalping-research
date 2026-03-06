@@ -630,8 +630,8 @@ void LogAccountWideStatus()
    
    Print("\n========== ACCOUNT-WIDE STATUS ==========");
    Print(StringFormat("Trading Day: %s", TimeToString(g_CurrentTradingDay, TIME_DATE)));
-   Print(StringFormat("Daily Closed P/L: $%.2f (since day start: $%.2f)",
-                     g_DailyClosedPL, g_DailyStartClosedPL));
+   Print(StringFormat("Daily Closed P/L: $%.2f (trades closed today)",
+                     g_DailyClosedPL));
    Print(StringFormat("Floating P/L: $%.2f", totalFloatingPL));
    Print(StringFormat("Daily Total P/L: $%.2f (Closed + Floating)", dailyTotalPL));
    Print(StringFormat("Kill Switch: $%.2f limit | Distance: $%.2f (%.1f%% utilized)",
@@ -803,6 +803,58 @@ void AutoResetKillSwitches()
 }
 
 //+------------------------------------------------------------------+
+//| Get Closed P/L for trades closed before a specific date          |
+//+------------------------------------------------------------------+
+double GetClosedPLBeforeDate(datetime beforeDate)
+{
+   double totalClosed = 0.0;
+   
+   for(int i = 0; i < OrdersHistoryTotal(); i++)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderType() > OP_SELL) continue;  // Skip pending orders
+      
+      // Only count trades closed before the specified date
+      if(OrderCloseTime() < beforeDate)
+      {
+         totalClosed += OrderProfit() + OrderSwap() + OrderCommission();
+      }
+   }
+   
+   return totalClosed;
+}
+
+//+------------------------------------------------------------------+
+//| Get Closed P/L for trades closed on a specific date              |
+//| IMPORTANT: Only counts trades from identified providers, not     |
+//| manual trades or trades from other EAs                           |
+//+------------------------------------------------------------------+
+double GetClosedPLOnDate(datetime onDate)
+{
+   double totalClosed = 0.0;
+   datetime dayStart = StringToTime(TimeToString(onDate, TIME_DATE));
+   datetime dayEnd = dayStart + 86400;  // +24 hours
+   
+   for(int i = 0; i < OrdersHistoryTotal(); i++)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderType() > OP_SELL) continue;  // Skip pending orders
+      
+      // Only count trades closed on this specific date
+      if(OrderCloseTime() >= dayStart && OrderCloseTime() < dayEnd)
+      {
+         // CRITICAL: Only count trades from identified providers, skip manual trades
+         string pid = IdentifyProvider(OrderMagicNumber(), OrderComment());
+         if(StringLen(pid) == 0) continue;  // Skip non-provider trades
+         
+         totalClosed += OrderProfit() + OrderSwap() + OrderCommission();
+      }
+   }
+   
+   return totalClosed;
+}
+
+//+------------------------------------------------------------------+
 //| Check and Reset Daily Account Tracking                           |
 //+------------------------------------------------------------------+
 void CheckDailyReset()
@@ -810,32 +862,18 @@ void CheckDailyReset()
    datetime currentTime = TimeCurrent();
    datetime currentDay = StringToTime(TimeToString(currentTime, TIME_DATE)); // Strip time, keep date only
    
-   // Initialize on first run
-   if(g_CurrentTradingDay == 0)
+   // Initialize on first run or when day changes
+   if(g_CurrentTradingDay == 0 || g_CurrentTradingDay != currentDay)
    {
       g_CurrentTradingDay = currentDay;
-      g_DailyStartClosedPL = GetTotalAccountClosedPL();
+      g_DailyStartClosedPL = 0.0;  // Not used anymore, kept for compatibility
       g_DailyClosedPL = 0.0;
       
-      Print(StringFormat("📅 Daily tracking initialized: %s | Starting Closed P/L: $%.2f",
-                        TimeToString(currentDay, TIME_DATE), g_DailyStartClosedPL));
+      Print(StringFormat("📅 Daily tracking initialized: %s", TimeToString(currentDay, TIME_DATE)));
       
       AppendToAuditLog("ACCOUNT_WIDE", "DAILY_INIT", 0.0,
-                      StringFormat("Date: %s, Starting Closed P/L: $%.2f",
-                                  TimeToString(currentDay, TIME_DATE), g_DailyStartClosedPL));
-      return;
-   }
-   
-   // Check if it's a new trading day
-   if(currentDay > g_CurrentTradingDay)
-   {
-      // New trading day - reset daily tracking
-      datetime oldDay = g_CurrentTradingDay;
-      double oldDailyPL = g_DailyClosedPL;
-      
-      g_CurrentTradingDay = currentDay;
-      g_DailyStartClosedPL = GetTotalAccountClosedPL();
-      g_DailyClosedPL = 0.0;
+                      StringFormat("Date: %s - Daily P/L will be calculated from today's closed trades",
+                                  TimeToString(currentDay, TIME_DATE)));
       
       // Reset account kill switch for new day
       if(g_AccountKillSwitchTriggered)
@@ -844,15 +882,10 @@ void CheckDailyReset()
          Print("✓ Account kill switch RESET for new trading day");
       }
       
-      Print(StringFormat("📅 NEW TRADING DAY RESET: %s → %s",
-                        TimeToString(oldDay, TIME_DATE), TimeToString(currentDay, TIME_DATE)));
-      Print(StringFormat("   Previous day P/L: $%.2f | New starting Closed P/L: $%.2f",
-                        oldDailyPL, g_DailyStartClosedPL));
-      
-      AppendToAuditLog("ACCOUNT_WIDE", "DAILY_RESET", 0.0,
-                      StringFormat("New day: %s, Previous day P/L: $%.2f, New starting Closed P/L: $%.2f",
-                                  TimeToString(currentDay, TIME_DATE), oldDailyPL, g_DailyStartClosedPL));
+      return;
    }
+   
+   // Note: Day change is now handled in the initialization block above
 }
 
 //+------------------------------------------------------------------+
@@ -865,12 +898,15 @@ void CheckAccountWideProtection()
    // Check for daily reset first
    CheckDailyReset();
    
+   // Safety check: Ensure trading day is initialized
+   if(g_CurrentTradingDay == 0) return;  // Wait for proper initialization
+   
    // Get total account floating P/L across ALL groups
    double totalFloatingPL = GetTotalAccountFloatingPL();
    
-   // Calculate daily closed P/L (closed today only)
-   double totalClosedPL = GetTotalAccountClosedPL();
-   g_DailyClosedPL = totalClosedPL - g_DailyStartClosedPL;
+   // Calculate daily closed P/L by directly summing trades closed today
+   // Note: Only counts provider trades, not manual trades or other EAs
+   g_DailyClosedPL = GetClosedPLOnDate(g_CurrentTradingDay);
    
    datetime currentTime = TimeCurrent();
    
@@ -2234,8 +2270,8 @@ int OnInit()
    g_LastButtonUpdate = TimeCurrent();
    g_LastStatusLog = TimeCurrent();
    
-   // Initialize daily tracking
-   g_CurrentTradingDay = 0;         // Will be set on first CheckDailyReset() call
+   // Initialize daily tracking - will be recalculated from history on first CheckDailyReset() call
+   g_CurrentTradingDay = 0;
    g_DailyStartClosedPL = 0.0;
    g_DailyClosedPL = 0.0;
    
