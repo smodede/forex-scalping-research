@@ -58,6 +58,10 @@ input bool   EnableKeyboardShortcuts = true;    // Enable keyboard shortcuts
 input bool   EnableAutoResetAfterKillSwitch = true;  // Auto-reset kill switches after trigger
 input int    AutoResetDelaySeconds = 300;             // Delay before auto-reset (5 minutes default)
 
+// Log Rotation Settings
+input bool   EnableLogRotation = true;                // Enable automatic log file rotation
+input double MaxLogFileSizeMB = 10.0;                 // Max log file size in MB before rotation
+
 // UI Settings
 input int    ButtonXPosition = 20;
 input int    ButtonYPosition = 50;
@@ -641,6 +645,55 @@ void LogAccountWideStatus()
                    StringFormat("Daily Closed: $%.2f, Floating: $%.2f, Daily Total: $%.2f, Distance to Kill: $%.2f, Date: %s",
                                g_DailyClosedPL, totalFloatingPL, dailyTotalPL, distanceToKillSwitch,
                                TimeToString(g_CurrentTradingDay, TIME_DATE)));
+}
+
+//+------------------------------------------------------------------+
+//| Rotate log file if it exceeds size threshold                     |
+//+------------------------------------------------------------------+
+void RotateLogFileIfNeeded()
+{
+   if(!EnableLogRotation) return;
+   
+   // Check if file exists
+   int handle = FileOpen(g_AuditFileName, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(handle == INVALID_HANDLE) return;  // File doesn't exist yet, no rotation needed
+   
+   // Get file size in bytes
+   long fileSizeBytes = (long)FileSize(handle);
+   FileClose(handle);
+   
+   // Convert max size from MB to bytes
+   long maxSizeBytes = (long)MathFloor(MaxLogFileSizeMB * 1048576.0);
+   
+   // Check if rotation is needed
+   if(fileSizeBytes < maxSizeBytes) return;
+   
+   // Create archive filename with timestamp
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   string archiveName = StringFormat("shra_provider_audit_%d_%04d-%02d-%02d_%02d%02d%02d.csv",
+                                      AccountNumber(),
+                                      dt.year, dt.mon, dt.day,
+                                      dt.hour, dt.min, dt.sec);
+   
+   // Copy current log to archive
+   if(FileCopy(g_AuditFileName, 0, archiveName, 0))
+   {
+      // Delete original file so it can be recreated fresh
+      if(FileDelete(g_AuditFileName))
+      {
+         Print(StringFormat("✓ Log rotated: %s archived as %s (%.2f MB)",
+                           g_AuditFileName, archiveName, fileSizeBytes / (1024.0 * 1024.0)));
+      }
+      else
+      {
+         Print(StringFormat("⚠ Log rotation: Archive created but failed to delete original: %s", g_AuditFileName));
+      }
+   }
+   else
+   {
+      Print(StringFormat("⚠ Failed to rotate log file: %s", g_AuditFileName));
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -2164,6 +2217,9 @@ int OnInit()
    Print("Fix: Killed providers excluded from group aggregation");
    
    g_AuditFileName = "shra_provider_audit_" + IntegerToString(AccountNumber()) + ".csv";
+   
+   // Check and rotate log file if needed
+   RotateLogFileIfNeeded();
    
    if(!ParseProviderDDSettings())
    {

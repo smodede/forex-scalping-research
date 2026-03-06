@@ -1,4 +1,0 @@
-Timestamp,Event,Description,Value,Equity,DD%,ActiveProviders
-2026.02.14 04:53:12,EA_START,EA initialized successfully,202722.62,202722.62,0.00,0
-2026.02.14 04:54:01,EA_STOP,EA deinitialized. Reason: 9,202722.62,202722.62,0.00,0
-2026.02.14 04:54:38,EA_START,EA initialized successfully,202722.62,202722.62,0.00,0
