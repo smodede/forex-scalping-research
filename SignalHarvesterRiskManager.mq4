@@ -10,7 +10,7 @@
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS - FTMO $200K ACCOUNT CONFIGURATION              |
 //+------------------------------------------------------------------+
-input string ProviderDDSettings = "sig_284538,12.0,18.0,22.0,30000.0;sig_284214,12.0,18.0,22.0,10000.0;sig_284720,12.0,18.0,22.0,10000.0;sig_286254,12.0,18.0,22.0,10000.0;sig_286289,12.0,18.0,22.0,10000.0;sig_276594,12.0,18.0,22.0,10000.0;sig_286940,12.0,18.0,22.0,10000.0";
+input string ProviderDDSettings = "sig_284538,12,18,22,30000;sig_284214,12,18,22,10000;sig_286254,12,18,22,10000;sig_286940,12,18,22,10000;sig_287208,12,18,22,10000";
 // Format: ProviderID,warnDD%,critDD%,emergDD%,minPeak;...
 // Sets default DD thresholds for ALL providers in Group 284538
 // Accommodates signals up to 20% Historical DD
@@ -215,6 +215,13 @@ bool ParseProviderDDSettings()
    
    string raw = ProviderDDSettings;
    int providerCount = 0;
+   
+   if(StringLen(raw) == 0)
+   {
+      Print("ERROR: ProviderDDSettings is empty! Check EA input parameters.");
+      Alert("ProviderDDSettings is empty! Check EA inputs.");
+      return false;
+   }
    
    while(StringLen(raw) > 0)
    {
