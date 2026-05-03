@@ -97,16 +97,7 @@ def simulate_fill(
         exit_price = candle_close
         exit_reason = "signal"
 
-    # Gross PnL
-    if direction == "long":
-        pnl_gross = (exit_price - fill_price) * quantity * (1.0 / pip_size) * cost_model.pip_value
-    else:
-        pnl_gross = (fill_price - exit_price) * quantity * (1.0 / pip_size) * cost_model.pip_value
-
-    # Simplify: pnl_gross = price_diff / pip_size * pip_value * quantity
-    # Since pip_value / pip_size = 10_000 for standard pairs this gives
-    # the correct $ value per pip movement.
-    # Re-derive cleanly:
+    # Gross PnL: convert price movement to pips, then to dollar value
     price_diff = (exit_price - fill_price) if direction == "long" else (fill_price - exit_price)
     pips_moved = price_diff / pip_size
     pnl_gross = pips_moved * cost_model.pip_value * quantity

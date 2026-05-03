@@ -145,8 +145,6 @@ class CostModel:
         slippage = self.calculate_slippage(
             direction, price, self.slippage_pips, self.pip_value
         )
-        slippage_cost = slippage * quantity * (self.pip_value / (self.pip_value / 10_000 if self.pip_value >= 1.0 else self.pip_value / 100))
-        # Simplify: slippage_cost = slippage_pips * quantity * pip_value
         slippage_cost = self.slippage_pips * quantity * self.pip_value
         spread_cost = self.calculate_spread_cost(spread, quantity, self.pip_value)
         total = commission + slippage_cost + spread_cost

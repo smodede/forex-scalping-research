@@ -125,5 +125,5 @@ class BacktestEngine:
             trade_log=trade_log,
             metrics=metrics,
             equity_curve=equity_curve,
-            params=strategy.strategy_params.params if strategy.strategy_params else {},
+            params=strategy.params.params if strategy.params else {},
         )
