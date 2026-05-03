@@ -1,0 +1,37 @@
+sources:
+  dukascopy:
+    type: csv
+    role: primary_optimization
+    description: "Dukascopy/JForex tick-level bid/ask data"
+    column_mapping:
+      timestamp: "Time (UTC)"
+      bid: "Bid"
+      ask: "Ask"
+      volume: "Volume"
+    timestamp_format: "%Y.%m.%d %H:%M:%S.%f"
+    default_separator: ","
+    
+  truefx:
+    type: csv_or_zip
+    role: validation
+    description: "TrueFX tick data for independent validation"
+    column_mapping:
+      symbol: "Symbol"
+      timestamp: "Timestamp"
+      bid: "Bid"
+      ask: "Ask"
+    timestamp_format: "%Y%m%d %H:%M:%S.%f"
+    default_separator: ","
+    
+  mt5:
+    type: csv
+    role: final_validation
+    description: "MetaTrader 5 exported tick/candle data"
+    column_mapping:
+      timestamp: "Time"
+      bid: "Bid"
+      ask: "Ask"
+      last: "Last"
+      volume: "Volume"
+    timestamp_format: "%Y.%m.%d %H:%M:%S.%f"
+    default_separator: "\t"

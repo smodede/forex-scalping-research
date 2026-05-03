@@ -1,0 +1,28 @@
+project:
+  name: forex-scalping-research
+  version: "0.1.0"
+  
+data:
+  base_dir: data
+  default_source: dukascopy
+  
+pairs:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - NZDUSD
+
+timeframes:
+  - 1m
+  - 3m
+  - 5m
+  - 15m
+
+backtest:
+  initial_capital: 10000
+  commission_per_lot: 3.5
+  default_slippage_pips: 0.3
+  max_spread_pips: 2.0

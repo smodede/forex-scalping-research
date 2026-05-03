@@ -1,0 +1,49 @@
+pairs:
+  EURUSD:
+    pip_value: 0.0001
+    typical_spread_pips: 0.8
+    session_focus: [london, new_york]
+    
+  GBPUSD:
+    pip_value: 0.0001
+    typical_spread_pips: 1.0
+    session_focus: [london, new_york]
+    
+  USDJPY:
+    pip_value: 0.01
+    typical_spread_pips: 0.8
+    session_focus: [tokyo, london, new_york]
+    
+  AUDUSD:
+    pip_value: 0.0001
+    typical_spread_pips: 1.0
+    session_focus: [sydney, tokyo]
+    
+  USDCAD:
+    pip_value: 0.0001
+    typical_spread_pips: 1.2
+    session_focus: [new_york]
+    
+  USDCHF:
+    pip_value: 0.0001
+    typical_spread_pips: 1.0
+    session_focus: [london, new_york]
+    
+  NZDUSD:
+    pip_value: 0.0001
+    typical_spread_pips: 1.2
+    session_focus: [sydney, tokyo]
+
+sessions:
+  sydney:
+    open_utc: "21:00"
+    close_utc: "06:00"
+  tokyo:
+    open_utc: "00:00"
+    close_utc: "09:00"
+  london:
+    open_utc: "07:00"
+    close_utc: "16:00"
+  new_york:
+    open_utc: "12:00"
+    close_utc: "21:00"

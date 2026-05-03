@@ -1,0 +1,24 @@
+[project]
+name = "forex-scalping-research"
+version = "0.1.0"
+description = "Forex scalping research pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "numpy",
+    "pyarrow",
+    "pydantic",
+    "pydantic-settings",
+    "typer",
+    "fastapi",
+    "uvicorn",
+    "matplotlib",
+    "optuna",
+    "pytest",
+    "pyyaml",
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"

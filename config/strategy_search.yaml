@@ -1,0 +1,31 @@
+search:
+  strategies:
+    - mean_reversion_scalper
+    - breakout_scalper
+    - trend_pullback_scalper
+    
+  optimization:
+    engine: optuna
+    n_trials: 500
+    sampler: TPE
+    pruner: MedianPruner
+    
+  walk_forward:
+    n_splits: 5
+    train_ratio: 0.7
+    gap_bars: 100
+    
+  validation_gates:
+    min_trades: 50
+    min_profit_factor: 1.3
+    max_drawdown_pct: 10.0
+    min_sharpe: 1.0
+    min_win_rate: 0.45
+    max_avg_trade_duration_minutes: 60
+    min_oos_retention: 0.6
+
+  robustness:
+    monte_carlo_runs: 1000
+    param_perturbation_pct: 10
+    slippage_stress_multiplier: 2.0
+    spread_stress_multiplier: 1.5

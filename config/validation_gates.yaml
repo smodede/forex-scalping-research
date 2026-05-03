@@ -1,0 +1,27 @@
+gates:
+  in_sample:
+    min_trades: 100
+    min_profit_factor: 1.5
+    max_drawdown_pct: 8.0
+    min_sharpe: 1.2
+    
+  out_of_sample:
+    min_trades: 50
+    min_profit_factor: 1.3
+    max_drawdown_pct: 10.0
+    min_sharpe: 1.0
+    min_retention_vs_is: 0.6
+    
+  cross_source:
+    max_metric_deviation_pct: 25
+    min_profit_factor: 1.2
+    
+  robustness:
+    monte_carlo_confidence: 0.95
+    min_profitable_mc_pct: 80
+    param_sensitivity_max_drop_pct: 30
+    
+  pre_deploy:
+    require_all_gates_passed: true
+    require_paper_trading_days: 5
+    max_paper_vs_backtest_deviation_pct: 30
