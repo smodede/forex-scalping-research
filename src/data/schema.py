@@ -68,12 +68,12 @@ class CandleRecord(BaseModel):
         for prefix in ("bid", "mid", "ask"):
             o = getattr(self, f"{prefix}_open")
             h = getattr(self, f"{prefix}_high")
-            l = getattr(self, f"{prefix}_low")  # noqa: E741
+            low = getattr(self, f"{prefix}_low")
             c = getattr(self, f"{prefix}_close")
             if h < max(o, c):
                 raise ValueError(f"{prefix}_high ({h}) must be >= open ({o}) and close ({c})")
-            if l > min(o, c):
-                raise ValueError(f"{prefix}_low ({l}) must be <= open ({o}) and close ({c})")
+            if low > min(o, c):
+                raise ValueError(f"{prefix}_low ({low}) must be <= open ({o}) and close ({c})")
         if self.tick_count < 1:
             raise ValueError(f"tick_count must be >= 1, got {self.tick_count}")
         return self

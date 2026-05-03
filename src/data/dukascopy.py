@@ -74,7 +74,6 @@ class DukascopyAdapter(DataAdapter):
             ("weekend_data", weekend),
         ]:
             for pos in df.index[mask]:
-                loc = df.index.get_loc(pos)
                 df.at[pos, "quality_flags"] = df.at[pos, "quality_flags"] + [label]
 
         return df

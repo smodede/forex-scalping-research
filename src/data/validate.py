@@ -59,20 +59,20 @@ def validate_candle_dataframe(df: pd.DataFrame) -> list[str]:
 
     # OHLC relationships for each price series
     for prefix in ("bid", "mid", "ask"):
-        o, h, l, c = (  # noqa: E741
+        o, h, low, c = (
             f"{prefix}_open",
             f"{prefix}_high",
             f"{prefix}_low",
             f"{prefix}_close",
         )
-        if not {o, h, l, c}.issubset(df.columns):
+        if not {o, h, low, c}.issubset(df.columns):
             continue
         high_violation = (df[h] < df[[o, c]].max(axis=1)).sum()
         if high_violation:
             errors.append(f"{high_violation} rows where {h} < max(open, close)")
-        low_violation = (df[l] > df[[o, c]].min(axis=1)).sum()
+        low_violation = (df[low] > df[[o, c]].min(axis=1)).sum()
         if low_violation:
-            errors.append(f"{low_violation} rows where {l} > min(open, close)")
+            errors.append(f"{low_violation} rows where {low} > min(open, close)")
 
     # tick_count
     if "tick_count" in df.columns and (df["tick_count"] < 1).any():
