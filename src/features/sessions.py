@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from typing import List, Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 import yaml
@@ -46,7 +46,7 @@ def _in_session(t: dt.time, open_t: dt.time, close_t: dt.time) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def get_session(timestamp_utc: dt.datetime | pd.Timestamp) -> List[str]:
+def get_session(timestamp_utc: dt.datetime | pd.Timestamp) -> list[str]:
     """Return the list of active sessions for a UTC timestamp.
 
     Overlap sessions (e.g. ``overlap_london_ny``) are appended when more

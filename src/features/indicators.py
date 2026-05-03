@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -73,7 +71,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 def bollinger_bands(
     series: pd.Series, period: int = 20, std_dev: float = 2.0
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Bollinger Bands.
 
     Parameters
@@ -136,7 +134,7 @@ def macd(
     fast: int = 12,
     slow: int = 26,
     signal: int = 9,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Moving Average Convergence Divergence.
 
     Parameters
@@ -167,7 +165,7 @@ def stochastic(
     close: pd.Series,
     k_period: int = 14,
     d_period: int = 3,
-) -> Tuple[pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series]:
     """Stochastic Oscillator (%K and %D).
 
     Parameters
