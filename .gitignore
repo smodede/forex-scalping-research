@@ -1,3 +1,55 @@
-src/data/__pycache__/
-src/forex_scalping_research.egg-info/
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (keep directory structure, ignore contents)
+data/raw/*
+data/processed/*
+data/cache/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/cache/.gitkeep
+
+# Reports (generated)
+reports/backtests/*
+reports/walk_forward/*
+reports/robustness/*
+reports/reconciliation/*
+reports/paper_trading/*
+!reports/backtests/.gitkeep
+!reports/walk_forward/.gitkeep
+!reports/robustness/.gitkeep
+!reports/reconciliation/.gitkeep
+!reports/paper_trading/.gitkeep
+
+# Config overrides
+config/local.yaml
+config/secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
